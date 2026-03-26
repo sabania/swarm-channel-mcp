@@ -9,10 +9,7 @@
   "plugins": [
     {
       "name": "swarm",
-      "source": {
-        "source": "npm",
-        "package": "swarm-channel-plugin"
-      },
+      "source": "./plugin",
       "description": "Agent swarm channel plugin — register, discover, and communicate with other Claude Code agents in real-time",
       "version": "0.1.0"
     }

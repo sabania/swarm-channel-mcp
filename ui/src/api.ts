@@ -60,3 +60,17 @@ export async function launchAgent(id: string): Promise<{ ok?: boolean; error?: s
   return res.json();
 }
 
+export async function createAgent(agent: {
+  id: string;
+  name: string;
+  description: string;
+  cwd: string;
+}): Promise<AgentInfo & { error?: string }> {
+  const res = await fetch(`${BASE}/agents`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(agent),
+  });
+  return res.json();
+}
+

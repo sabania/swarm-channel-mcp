@@ -14,6 +14,7 @@ import "@xyflow/react/dist/style.css";
 
 import { AgentNode } from "./AgentNode";
 import { AgentPanel } from "./AgentPanel";
+import { CreateAgentDialog } from "./CreateAgentDialog";
 import { fetchTopology, addEdge, removeEdge, type AgentInfo } from "./api";
 
 const nodeTypes = { agent: AgentNode };
@@ -52,6 +53,7 @@ export default function App() {
   const [edges, setEdges, onEdgesChange] = useEdgesState([]);
   const [allAgents, setAllAgents] = useState<Record<string, AgentInfo>>({});
   const [selectedAgent, setSelectedAgent] = useState<string | null>(null);
+  const [showCreateDialog, setShowCreateDialog] = useState(false);
 
   const loadTopology = useCallback(async () => {
     const topo = await fetchTopology();
@@ -124,6 +126,22 @@ export default function App() {
         <span style={{ color: "#585b70", marginLeft: 12, fontSize: 11 }}>
           Drag between nodes to connect — Double-click edge to disconnect
         </span>
+        <button
+          onClick={() => setShowCreateDialog(true)}
+          style={{
+            marginLeft: 12,
+            padding: "4px 12px",
+            background: "#a6e3a1",
+            color: "#1e1e2e",
+            border: "none",
+            borderRadius: 6,
+            cursor: "pointer",
+            fontSize: 12,
+            fontWeight: "bold",
+          }}
+        >
+          + Add Agent
+        </button>
       </div>
       <ReactFlow
         nodes={nodes}
@@ -147,6 +165,13 @@ export default function App() {
           onClose={() => setSelectedAgent(null)}
           onUpdate={loadTopology}
           onSelectAgent={setSelectedAgent}
+        />
+      )}
+      {showCreateDialog && (
+        <CreateAgentDialog
+          existingIds={Object.keys(allAgents)}
+          onClose={() => setShowCreateDialog(false)}
+          onCreated={loadTopology}
         />
       )}
     </div>

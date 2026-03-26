@@ -1,3 +1,9 @@
 node_modules/
-dist/
 *.tmp
+
+# Service + UI dist are build artifacts
+service/dist/
+ui/dist/
+
+# Plugin bundle IS tracked (needed by marketplace)
+# plugin/dist/ is NOT ignored

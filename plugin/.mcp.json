@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "swarm-plugin": {
+      "command": "node",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/dist/index.mjs"],
+      "env": {
+        "SWARM_URL": "http://127.0.0.1:3001"
+      }
+    }
+  }
+}

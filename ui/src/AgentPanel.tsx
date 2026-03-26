@@ -1,0 +1,171 @@
+import { useState } from "react";
+import type { AgentInfo } from "./api";
+import { updateAgent, removeAgent, launchAgent } from "./api";
+
+interface Props {
+  agent: AgentInfo;
+  onClose: () => void;
+  onUpdate: () => void;
+  onSelectAgent: (id: string) => void;
+}
+
+export function AgentPanel({ agent, onClose, onUpdate, onSelectAgent }: Props) {
+  const [agentId, setAgentId] = useState(agent.id);
+  const [name, setName] = useState(agent.name);
+  const [description, setDescription] = useState(agent.description);
+  const [publicDesc, setPublicDesc] = useState(agent.publicDescription);
+  const [autoconnect, setAutoconnect] = useState(agent.autoconnect);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  const statusColor: Record<string, string> = {
+    available: "#22c55e",
+    busy: "#f59e0b",
+    offline: "#6b7280",
+  };
+
+  async function handleSave() {
+    setSaving(true);
+    setError("");
+    const idChanged = agentId !== agent.id;
+    const result = await updateAgent(agent.id, {
+      ...(idChanged ? { id: agentId } : {}),
+      name,
+      description,
+      publicDescription: publicDesc,
+      autoconnect,
+    });
+    setSaving(false);
+    if (!result || result.error) {
+      setError(result?.error || "Failed to update. ID might be taken.");
+      return;
+    }
+    if (idChanged) onSelectAgent(agentId);
+    onUpdate();
+  }
+
+  async function handleLaunch() {
+    setError("");
+    const result = await launchAgent(agent.id);
+    if (result.error) {
+      setError(result.error);
+    }
+    onUpdate();
+  }
+
+  async function handleRemove() {
+    if (confirm(`Remove agent "${agent.name}"?`)) {
+      await removeAgent(agent.id);
+      onClose();
+      onUpdate();
+    }
+  }
+
+  return (
+    <div
+      style={{
+        position: "absolute",
+        right: 0,
+        top: 0,
+        bottom: 0,
+        width: 360,
+        background: "#181825",
+        borderLeft: "1px solid #313244",
+        padding: 20,
+        overflowY: "auto",
+        fontFamily: "system-ui, sans-serif",
+        color: "#cdd6f4",
+        zIndex: 10,
+      }}
+    >
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+        <h2 style={{ margin: 0, fontSize: 18 }}>Agent Details</h2>
+        <button onClick={onClose} style={btnStyle}>✕</button>
+      </div>
+
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 16 }}>
+        <div style={{ width: 10, height: 10, borderRadius: "50%", background: statusColor[agent.status] }} />
+        <span style={{ fontSize: 13, color: "#a6adc8" }}>{agent.status}</span>
+      </div>
+
+      {error && (
+        <div style={{ background: "#f38ba822", border: "1px solid #f38ba8", borderRadius: 6, padding: "6px 10px", fontSize: 12, color: "#f38ba8", marginBottom: 12 }}>
+          {error}
+        </div>
+      )}
+
+      <label style={labelStyle}>ID</label>
+      <input style={inputStyle} value={agentId} onChange={(e) => setAgentId(e.target.value)} />
+
+      <label style={labelStyle}>Name</label>
+      <input style={inputStyle} value={name} onChange={(e) => setName(e.target.value)} />
+
+      <label style={labelStyle}>Internal Description (private)</label>
+      <textarea style={{ ...inputStyle, height: 80, resize: "vertical" }} value={description} onChange={(e) => setDescription(e.target.value)} />
+
+      <label style={labelStyle}>Public Description (shown to others)</label>
+      <textarea
+        style={{ ...inputStyle, height: 80, resize: "vertical" }}
+        value={publicDesc}
+        onChange={(e) => setPublicDesc(e.target.value)}
+        placeholder="Leave empty to use internal description"
+      />
+
+      <label style={labelStyle}>Working Directory</label>
+      <input style={{ ...inputStyle, color: "#585b70" }} value={agent.cwd} readOnly />
+
+      <label style={{ ...labelStyle, display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+        <input type="checkbox" checked={autoconnect} onChange={(e) => setAutoconnect(e.target.checked)} />
+        Autoconnect on startup
+      </label>
+
+      <div style={{ fontSize: 11, color: "#585b70", marginTop: 12 }}>
+        Registered: {new Date(agent.registeredAt).toLocaleString()}<br />
+        Last seen: {new Date(agent.lastSeen).toLocaleString()}
+      </div>
+
+      <div style={{ display: "flex", gap: 8, marginTop: 20 }}>
+        <button onClick={handleSave} disabled={saving} style={{ ...btnStyle, background: "#89b4fa", color: "#1e1e2e", flex: 1 }}>
+          {saving ? "Saving..." : "Save"}
+        </button>
+        {agent.status === "offline" && agent.cwd && (
+          <button onClick={handleLaunch} style={{ ...btnStyle, background: "#a6e3a1", color: "#1e1e2e" }}>
+            Launch
+          </button>
+        )}
+        <button onClick={handleRemove} style={{ ...btnStyle, background: "#f38ba8", color: "#1e1e2e" }}>
+          Remove
+        </button>
+      </div>
+    </div>
+  );
+}
+
+const labelStyle: React.CSSProperties = {
+  display: "block",
+  fontSize: 12,
+  color: "#a6adc8",
+  marginTop: 12,
+  marginBottom: 4,
+};
+
+const inputStyle: React.CSSProperties = {
+  width: "100%",
+  padding: "8px 10px",
+  background: "#1e1e2e",
+  border: "1px solid #313244",
+  borderRadius: 6,
+  color: "#cdd6f4",
+  fontSize: 13,
+  boxSizing: "border-box",
+};
+
+const btnStyle: React.CSSProperties = {
+  padding: "6px 12px",
+  background: "#313244",
+  border: "none",
+  borderRadius: 6,
+  color: "#cdd6f4",
+  cursor: "pointer",
+  fontSize: 13,
+};

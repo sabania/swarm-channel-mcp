@@ -1,0 +1,17 @@
+{
+  "name": "swarm-channel",
+  "owner": {
+    "name": "Swarm Channel"
+  },
+  "metadata": {
+    "description": "Multi-agent swarm communication for Claude Code"
+  },
+  "plugins": [
+    {
+      "name": "swarm",
+      "source": "./plugin",
+      "description": "Agent swarm channel plugin — register, discover, and communicate with other Claude Code agents in real-time",
+      "version": "0.1.0"
+    }
+  ]
+}

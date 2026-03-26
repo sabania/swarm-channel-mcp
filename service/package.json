@@ -1,0 +1,21 @@
+{
+  "name": "swarm-service",
+  "version": "0.1.0",
+  "description": "Central swarm broker – REST API + SSE push",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts"
+  },
+  "dependencies": {
+    "express": "^5.2.1"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.3",
+    "tsx": "^4.19.4",
+    "@types/node": "^22.15.0",
+    "@types/express": "^5.0.0"
+  }
+}

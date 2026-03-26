@@ -1,0 +1,13 @@
+{
+  "name": "swarm-channel-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Multi-agent swarm communication for Claude Code",
+  "scripts": {
+    "build": "npm run build --prefix service && npm run build --prefix plugin",
+    "start:service": "npm start --prefix service",
+    "start:plugin": "npm start --prefix plugin",
+    "dev:service": "npm run dev --prefix service",
+    "install:all": "npm install --prefix service && npm install --prefix plugin"
+  }
+}

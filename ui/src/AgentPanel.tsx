@@ -15,6 +15,8 @@ export function AgentPanel({ agent, onClose, onUpdate, onSelectAgent }: Props) {
   const [description, setDescription] = useState(agent.description);
   const [publicDesc, setPublicDesc] = useState(agent.publicDescription);
   const [autoconnect, setAutoconnect] = useState(agent.autoconnect);
+  const DEFAULT_LAUNCH_CMD = "claude --continue --dangerously-load-development-channels plugin:swarm@swarm-channel";
+  const [launchCmd, setLaunchCmd] = useState(agent.launchCommand || DEFAULT_LAUNCH_CMD);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
 
@@ -34,6 +36,7 @@ export function AgentPanel({ agent, onClose, onUpdate, onSelectAgent }: Props) {
       description,
       publicDescription: publicDesc,
       autoconnect,
+      launchCommand: launchCmd,
     });
     setSaving(false);
     if (!result || result.error) {
@@ -113,6 +116,9 @@ export function AgentPanel({ agent, onClose, onUpdate, onSelectAgent }: Props) {
 
       <label style={labelStyle}>Working Directory</label>
       <input style={{ ...inputStyle, color: "#585b70" }} value={agent.cwd} readOnly />
+
+      <label style={labelStyle}>Launch Command</label>
+      <input style={inputStyle} value={launchCmd} onChange={(e) => setLaunchCmd(e.target.value)} />
 
       <label style={{ ...labelStyle, display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
         <input type="checkbox" checked={autoconnect} onChange={(e) => setAutoconnect(e.target.checked)} />

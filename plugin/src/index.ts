@@ -179,7 +179,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           name: string;
           description: string;
         };
-        await api("POST", "/agents", { id, name: agentName, description, cwd: process.cwd() });
+        await api("POST", "/agents", { id, name: agentName, description });
         agentId = id;
         saveLocalConfig({ id, autoconnect: true });
         connectSSE(id);
@@ -227,9 +227,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (!agentId) return text("You must register first.");
         const { query } = args as { query: string };
         const agents = await api("GET", `/agents/${agentId}/connections`);
-        return text(
-          `Search query: "${query}"\n\nConnected agents:\n${JSON.stringify(agents, null, 2)}\n\nMatch the query against the agent descriptions to find the best fit.`
-        );
+        return text(`Searching for: "${query}"\n\n${JSON.stringify(agents, null, 2)}`);
       }
 
       case "send_message": {
@@ -413,14 +411,14 @@ async function autoRegister(): Promise<void> {
         `Reconnected to swarm as "${data.agent.name}" (${data.agent.id}). ${data.agent.description} ${connList} If your capabilities have changed (new skills, MCPs, etc.), use update_profile to update your swarm description.`,
         { event_type: "auto_connected", agent_id: sanitizeKey(config.id) }
       );
+      console.error(`[swarm] Auto-connected as ${config.id}`);
     } else if (connectRes.status === 404) {
-      // ID not in service — agent needs to register manually
       await pushChannel(
         `Auto-connect failed: agent "${config.id}" is not known to the swarm service. Use 'register' to register with a full description of your capabilities.`,
         { event_type: "auto_connect_failed" }
       );
+      console.error(`[swarm] Auto-connect failed: ${config.id} not found in service`);
     }
-    console.error(`[swarm] Auto-connected as ${config.id}`);
   } catch (err) {
     console.error(`[swarm] Auto-connect failed:`, err);
   }

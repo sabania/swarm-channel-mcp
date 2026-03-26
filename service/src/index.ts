@@ -18,6 +18,9 @@ import {
   getTopology,
   addSSE,
   removeSSE,
+  toPublicView,
+  pushEvent,
+  isOnline,
 } from "./store.js";
 
 const PORT = parseInt(process.env.PORT || "3001", 10);
@@ -58,6 +61,15 @@ app.post("/agents/:id/connect", (req, res) => {
     return;
   }
   setAgentStatus(req.params.id, "available");
+
+  // Broadcast to connected peers
+  const publicView = toPublicView(agent);
+  for (const peer of getConnectedAgents(req.params.id)) {
+    if (isOnline(peer.id)) {
+      pushEvent(peer.id, "agent_online", publicView);
+    }
+  }
+
   const connected = getConnectedAgents(req.params.id);
   console.log(`↑ Agent reconnected: ${req.params.id} (${agent.name})`);
   res.json({ agent, connections: connected });
@@ -189,7 +201,7 @@ function launchTerminal(cwd: string, command: string): Promise<void> {
     let shellCmd: string;
 
     if (platform === "win32") {
-      shellCmd = `start cmd /k "cd /d ${cwd} && ${command}"`;
+      shellCmd = `start cmd /k "cd /d "${cwd}" && ${command}"`;
     } else if (platform === "darwin") {
       shellCmd = `osascript -e 'tell application "Terminal" to do script "cd ${cwd.replace(/'/g, "\\'")} && ${command}"'`;
     } else {
@@ -219,9 +231,8 @@ app.post("/agents/:id/launch", async (req, res) => {
     return;
   }
 
-  const command = "claude --dangerously-load-development-channels server:swarm-plugin";
   try {
-    await launchTerminal(agent.cwd, command);
+    await launchTerminal(agent.cwd, agent.launchCommand);
     console.log(`🚀 Launched agent: ${req.params.id} in ${agent.cwd}`);
     res.json({ ok: true, cwd: agent.cwd });
   } catch (err) {

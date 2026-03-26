@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import type { Response } from "express";
-import type { AgentInfo, AgentPublicView, SwarmTopology } from "./types.js";
+import { DEFAULT_LAUNCH_CMD, type AgentInfo, type AgentPublicView, type SwarmTopology } from "./types.js";
 
 // ── Persistence ─────────────────────────────────────────────────
 
@@ -171,6 +171,7 @@ export function registerAgent(info: {
     publicDescription: info.publicDescription ?? existing?.publicDescription ?? "",
     cwd: info.cwd || existing?.cwd || "",
     autoconnect: info.autoconnect ?? true,
+    launchCommand: existing?.launchCommand || DEFAULT_LAUNCH_CMD,
     status: "available",
     registeredAt: existing?.registeredAt || now,
     lastSeen: now,
@@ -206,7 +207,16 @@ export function agentOffline(agentId: string): boolean {
 }
 
 export function removeAgent(agentId: string): boolean {
-  if (!agents.has(agentId)) return false;
+  const agent = agents.get(agentId);
+  if (!agent) return false;
+
+  // Notify connected peers before removing
+  for (const peerId of getConnectedIds(agentId)) {
+    if (isOnline(peerId)) {
+      pushEvent(peerId, "agent_offline", { id: agentId, name: agent.name });
+    }
+  }
+
   agents.delete(agentId);
   for (let i = edges.length - 1; i >= 0; i--) {
     if (edges[i][0] === agentId || edges[i][1] === agentId) {
@@ -217,7 +227,7 @@ export function removeAgent(agentId: string): boolean {
   return true;
 }
 
-export function updateAgent(agentId: string, updates: Partial<Pick<AgentInfo, "name" | "description" | "publicDescription" | "cwd" | "autoconnect"> & { id: string }>): AgentInfo | null {
+export function updateAgent(agentId: string, updates: Partial<Pick<AgentInfo, "name" | "description" | "publicDescription" | "cwd" | "autoconnect" | "launchCommand"> & { id: string }>): AgentInfo | null {
   const agent = agents.get(agentId);
   if (!agent) return null;
 

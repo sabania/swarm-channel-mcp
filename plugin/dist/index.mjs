@@ -20957,7 +20957,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     switch (name) {
       case "register": {
         const { id, name: agentName, description } = args;
-        await api("POST", "/agents", { id, name: agentName, description, cwd: process.cwd() });
+        await api("POST", "/agents", { id, name: agentName, description });
         agentId = id;
         saveLocalConfig({ id, autoconnect: true });
         connectSSE(id);
@@ -21007,14 +21007,9 @@ ${JSON.stringify(updated, null, 2)}`);
         if (!agentId) return text("You must register first.");
         const { query } = args;
         const agents = await api("GET", `/agents/${agentId}/connections`);
-        return text(
-          `Search query: "${query}"
+        return text(`Searching for: "${query}"
 
-Connected agents:
-${JSON.stringify(agents, null, 2)}
-
-Match the query against the agent descriptions to find the best fit.`
-        );
+${JSON.stringify(agents, null, 2)}`);
       }
       case "send_message": {
         if (!agentId) return text("You must register first.");
@@ -21161,13 +21156,14 @@ async function autoRegister() {
         `Reconnected to swarm as "${data.agent.name}" (${data.agent.id}). ${data.agent.description} ${connList} If your capabilities have changed (new skills, MCPs, etc.), use update_profile to update your swarm description.`,
         { event_type: "auto_connected", agent_id: sanitizeKey(config2.id) }
       );
+      console.error(`[swarm] Auto-connected as ${config2.id}`);
     } else if (connectRes.status === 404) {
       await pushChannel(
         `Auto-connect failed: agent "${config2.id}" is not known to the swarm service. Use 'register' to register with a full description of your capabilities.`,
         { event_type: "auto_connect_failed" }
       );
+      console.error(`[swarm] Auto-connect failed: ${config2.id} not found in service`);
     }
-    console.error(`[swarm] Auto-connected as ${config2.id}`);
   } catch (err) {
     console.error(`[swarm] Auto-connect failed:`, err);
   }

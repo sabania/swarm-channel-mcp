@@ -7,6 +7,7 @@ export interface AgentInfo {
   publicDescription: string;
   cwd: string;
   autoconnect: boolean;
+  launchCommand: string;
   status: "available" | "busy" | "offline";
   registeredAt: string;
   lastSeen: string;
@@ -40,7 +41,7 @@ export async function removeEdge(from: string, to: string): Promise<void> {
 
 export async function updateAgent(
   id: string,
-  updates: Partial<Pick<AgentInfo, "name" | "description" | "publicDescription" | "cwd" | "autoconnect"> & { id: string }>
+  updates: Partial<Pick<AgentInfo, "name" | "description" | "publicDescription" | "cwd" | "autoconnect" | "launchCommand"> & { id: string }>
 ): Promise<AgentInfo & { error?: string }> {
   const res = await fetch(`${BASE}/agents/${id}`, {
     method: "PATCH",
@@ -59,10 +60,3 @@ export async function launchAgent(id: string): Promise<{ ok?: boolean; error?: s
   return res.json();
 }
 
-export function createSSE(onEvent: (event: string, data: unknown) => void): EventSource {
-  // SSE for topology changes - listen on a special admin endpoint
-  // For now we'll poll instead
-  const es = new EventSource(`${BASE}/events/__admin__`);
-  es.onmessage = (e) => onEvent("message", JSON.parse(e.data));
-  return es;
-}

@@ -1,18 +1,26 @@
 {
-  "name": "swarm-plugin",
+  "name": "swarm-channel-plugin",
   "version": "0.1.0",
-  "description": "Claude Code channel plugin for the swarm",
+  "description": "Claude Code channel plugin for agent swarm communication",
   "type": "module",
-  "main": "dist/index.js",
+  "files": [
+    "dist/index.mjs",
+    ".claude-plugin/",
+    ".mcp.json"
+  ],
   "scripts": {
     "build": "esbuild src/index.ts --bundle --platform=node --format=esm --outfile=dist/index.mjs --banner:js=\"import{createRequire}from'module';const require=createRequire(import.meta.url);\"",
-    "start": "node dist/index.js",
-    "dev": "tsx src/index.ts"
+    "prepublishOnly": "npm run build"
   },
-  "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.12.1"
+  "keywords": ["claude-code", "mcp", "swarm", "multi-agent", "channel"],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sabania/swarm-channel-mcp"
   },
+  "dependencies": {},
   "devDependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1",
     "@types/node": "^22.15.0",
     "esbuild": "^0.27.4",
     "tsx": "^4.19.4",

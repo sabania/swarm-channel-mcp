@@ -79,6 +79,15 @@ export function isOnline(agentId: string): boolean {
   return (sseConnections.get(agentId)?.length ?? 0) > 0;
 }
 
+export function closeSSE(agentId: string): void {
+  const conns = sseConnections.get(agentId);
+  if (!conns) return;
+  for (const res of conns) {
+    res.end();
+  }
+  sseConnections.delete(agentId);
+}
+
 // ── Graph / Topology ────────────────────────────────────────────
 
 export function getConnectedIds(agentId: string): string[] {
@@ -234,14 +243,26 @@ export function agentOffline(agentId: string): boolean {
 export function removeAgent(agentId: string): boolean {
   const agent = agents.get(agentId);
   if (!agent) return false;
+  const wasOnline = isOnline(agentId);
 
-  // Notify connected peers before removing
+  // 1. Notify the agent itself (if online) before closing SSE
+  if (wasOnline) {
+    pushEvent(agentId, "agent_removed", { id: agentId, reason: "Removed by admin" });
+  }
+
+  // 2. Notify connected peers
   for (const peerId of getConnectedIds(agentId)) {
     if (isOnline(peerId)) {
-      pushEvent(peerId, "agent_offline", { id: agentId, name: agent.name });
+      pushEvent(peerId, "agent_removed", { id: agentId, name: agent.name });
     }
   }
 
+  // 3. Close SSE connections (agent will stop receiving events)
+  if (wasOnline) {
+    closeSSE(agentId);
+  }
+
+  // 4. Remove from store
   agents.delete(agentId);
   for (let i = edges.length - 1; i >= 0; i--) {
     if (edges[i][0] === agentId || edges[i][1] === agentId) {

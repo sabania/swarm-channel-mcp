@@ -348,6 +348,20 @@ async function connectSSE(id: string): Promise<void> {
             `Agent renamed: "${data.oldId}" is now "${data.newId}" (${data.name}). Use the new ID for future messages.`,
             { event_type: "agent_renamed", old_id: sanitizeKey(data.oldId), new_id: sanitizeKey(data.newId) }
           );
+        } else if (event === "agent_removed" && data.id === agentId) {
+          // We were removed from the swarm
+          agentId = null;
+          try { fs.unlinkSync(AGENT_CONFIG); } catch { /* may not exist */ }
+          await pushChannel(
+            `You were removed from the swarm by an admin. Your local config has been deleted. Use 'register' to rejoin.`,
+            { event_type: "agent_removed" }
+          );
+        } else if (event === "agent_removed" && data.id !== agentId) {
+          // A peer was removed
+          await pushChannel(
+            `Agent "${data.name}" (${data.id}) was removed from the swarm.`,
+            { event_type: "agent_removed", agent_id: sanitizeKey(data.id) }
+          );
         } else if (event === "properties_updated") {
           // Update local ID if changed
           if (data.id && data.id !== agentId) {
@@ -413,11 +427,13 @@ async function autoRegister(): Promise<void> {
       );
       console.error(`[swarm] Auto-connected as ${config.id}`);
     } else if (connectRes.status === 404) {
+      // Agent was removed or doesn't exist — clean up local config
+      try { fs.unlinkSync(AGENT_CONFIG); } catch { /* may not exist */ }
       await pushChannel(
-        `Auto-connect failed: agent "${config.id}" is not known to the swarm service. Use 'register' to register with a full description of your capabilities.`,
+        `Auto-connect failed: agent "${config.id}" was removed or is unknown to the swarm service. Local config deleted. Use 'register' to rejoin with a full description of your capabilities.`,
         { event_type: "auto_connect_failed" }
       );
-      console.error(`[swarm] Auto-connect failed: ${config.id} not found in service`);
+      console.error(`[swarm] Auto-connect failed: ${config.id} not found, local config deleted`);
     }
   } catch (err) {
     console.error(`[swarm] Auto-connect failed:`, err);

@@ -283,8 +283,13 @@ app.get("/events/:agentId", (req, res) => {
 
   req.on("close", () => {
     removeSSE(agentId, res);
-    agentOffline(agentId);
-    console.log(`⚡ SSE disconnected: ${agentId} (now offline)`);
+    // Only set offline if agent still exists (not removed)
+    if (getAgent(agentId)) {
+      agentOffline(agentId);
+      console.log(`⚡ SSE disconnected: ${agentId} (now offline)`);
+    } else {
+      console.log(`⚡ SSE closed: ${agentId} (agent was removed)`);
+    }
   });
 });
 

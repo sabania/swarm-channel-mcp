@@ -66,7 +66,7 @@ export async function createAgent(agent: {
   description: string;
   cwd: string;
 }): Promise<AgentInfo & { error?: string }> {
-  const res = await fetch(`${BASE}/agents`, {
+  const res = await fetch(`${BASE}/agents/create`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(agent),

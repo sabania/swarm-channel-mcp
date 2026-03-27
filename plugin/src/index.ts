@@ -335,7 +335,7 @@ async function connectSSE(id: string): Promise<void> {
           );
         } else if (event === "connected_to") {
           await pushChannel(
-            `New connection: ${data.name} (${data.id}) — ${data.description}`,
+            `New connection: ${data.name} (${data.id}, ${data.status}) — ${data.description}`,
             { event_type: "connected_to", agent_id: sanitizeKey(data.id) }
           );
         } else if (event === "disconnected_from") {

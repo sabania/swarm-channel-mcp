@@ -22,6 +22,7 @@ const nodeTypes = { agent: AgentNode };
 function topologyToFlow(
   agents: Record<string, AgentInfo>,
   topoEdges: [string, string][],
+  selectedId: string | null,
   onSelect: (id: string) => void
 ) {
   const ids = Object.keys(agents);
@@ -34,7 +35,7 @@ function topologyToFlow(
       x: (i % cols) * 250 + 50,
       y: Math.floor(i / cols) * 180 + 50,
     },
-    data: { agent: agents[id], onSelect },
+    data: { agent: agents[id], selected: id === selectedId, onSelect },
   }));
 
   const edges: Edge[] = topoEdges.map(([a, b]) => ({
@@ -58,7 +59,7 @@ export default function App() {
   const loadTopology = useCallback(async () => {
     const topo = await fetchTopology();
     setAllAgents(topo.nodes);
-    const flow = topologyToFlow(topo.nodes, topo.edges, setSelectedAgent);
+    const flow = topologyToFlow(topo.nodes, topo.edges, selectedAgent, setSelectedAgent);
     setNodes((prev) => {
       const posMap = new Map(prev.map((n) => [n.id, n.position]));
       return flow.nodes.map((n) => ({
@@ -67,7 +68,7 @@ export default function App() {
       }));
     });
     setEdges(flow.edges);
-  }, [setNodes, setEdges]);
+  }, [setNodes, setEdges, selectedAgent]);
 
   useEffect(() => {
     loadTopology();
@@ -161,6 +162,7 @@ export default function App() {
       </ReactFlow>
       {selected && (
         <AgentPanel
+          key={selectedAgent}
           agent={selected}
           onClose={() => setSelectedAgent(null)}
           onUpdate={loadTopology}

@@ -1,7 +1,11 @@
 import express from "express";
+import fs from "node:fs";
+import path from "node:path";
 import { exec } from "node:child_process";
 import os from "node:os";
+import { DEFAULT_LAUNCH_CMD } from "./types.js";
 import {
+  createAgent,
   registerAgent,
   agentOffline,
   removeAgent,
@@ -41,7 +45,23 @@ app.use((_req, res, next) => {
 
 // ── Agent Registration ──────────────────────────────────────────
 
-// First-time registration
+// Create agent from UI (offline)
+app.post("/agents/create", (req, res) => {
+  const { id, name, description, cwd } = req.body;
+  if (!id || !name || !cwd) {
+    res.status(400).json({ error: "id, name, cwd required" });
+    return;
+  }
+  const agent = createAgent({ id, name, description: description || `Agent ${name}`, cwd });
+  if (!agent) {
+    res.status(409).json({ error: `ID "${id}" already exists` });
+    return;
+  }
+  console.log(`+ Agent created: ${id} (${name}) [offline]`);
+  res.json(agent);
+});
+
+// Register from plugin (online)
 app.post("/agents", (req, res) => {
   const { id, name, description, cwd, autoconnect } = req.body;
   if (!id || !name || !description) {
@@ -232,7 +252,11 @@ app.post("/agents/:id/launch", async (req, res) => {
   }
 
   try {
-    await launchTerminal(agent.cwd, agent.launchCommand);
+    // Create .swarm-agent.json so plugin auto-connects with this ID
+    const configPath = path.join(agent.cwd, ".swarm-agent.json");
+    fs.writeFileSync(configPath, JSON.stringify({ id: agent.id, autoconnect: true }, null, 2));
+
+    await launchTerminal(agent.cwd, agent.launchCommand || DEFAULT_LAUNCH_CMD);
     console.log(`🚀 Launched agent: ${req.params.id} in ${agent.cwd}`);
     res.json({ ok: true, cwd: agent.cwd });
   } catch (err) {

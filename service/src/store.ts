@@ -153,6 +153,31 @@ export function getTopology(): SwarmTopology {
 
 // ── Agent Registry ──────────────────────────────────────────────
 
+export function createAgent(info: {
+  id: string;
+  name: string;
+  description: string;
+  cwd: string;
+}): AgentInfo | null {
+  if (agents.has(info.id)) return null;
+  const now = new Date().toISOString();
+  const agent: AgentInfo = {
+    id: info.id,
+    name: info.name,
+    description: info.description,
+    publicDescription: "",
+    cwd: info.cwd,
+    autoconnect: true,
+    launchCommand: DEFAULT_LAUNCH_CMD,
+    status: "offline",
+    registeredAt: now,
+    lastSeen: now,
+  };
+  agents.set(info.id, agent);
+  saveTopology();
+  return agent;
+}
+
 export function registerAgent(info: {
   id: string;
   name: string;

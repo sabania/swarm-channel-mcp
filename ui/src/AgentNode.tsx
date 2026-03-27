@@ -3,6 +3,7 @@ import type { AgentInfo } from "./api";
 
 export type AgentNodeData = {
   agent: AgentInfo;
+  selected: boolean;
   onSelect: (id: string) => void;
 };
 
@@ -13,21 +14,22 @@ const statusColor: Record<string, string> = {
 };
 
 export function AgentNode({ data }: NodeProps) {
-  const { agent, onSelect } = data as unknown as AgentNodeData;
+  const { agent, selected, onSelect } = data as unknown as AgentNodeData;
   const color = statusColor[agent.status] || "#6b7280";
 
   return (
     <div
       onClick={() => onSelect(agent.id)}
       style={{
-        background: "#1e1e2e",
-        border: `2px solid ${color}`,
+        background: selected ? "#242438" : "#1e1e2e",
+        border: `2px solid ${selected ? "#89b4fa" : color}`,
         borderRadius: 12,
         padding: "12px 16px",
         minWidth: 160,
         cursor: "pointer",
         color: "#cdd6f4",
         fontFamily: "system-ui, sans-serif",
+        boxShadow: selected ? "0 0 12px rgba(137,180,250,0.3)" : "none",
       }}
     >
       <Handle type="target" position={Position.Top} style={{ background: color }} />

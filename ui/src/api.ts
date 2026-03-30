@@ -1,14 +1,17 @@
 const BASE = import.meta.env.VITE_API_URL || "http://127.0.0.1:3001";
 
-export interface AgentInfo {
+export interface PublicAgentInfo {
   id: string;
   name: string;
   description: string;
+  status: "available" | "busy" | "offline";
+}
+
+export interface AgentInfo extends PublicAgentInfo {
   publicDescription: string;
   cwd: string;
   autoconnect: boolean;
   launchCommand: string;
-  status: "available" | "busy" | "offline";
   registeredAt: string;
   lastSeen: string;
 }
@@ -19,7 +22,12 @@ export interface Topology {
 }
 
 export async function fetchTopology(): Promise<Topology> {
-  const res = await fetch(`${BASE}/topology`);
+  const res = await fetch(`${BASE}/topology?full=true`);
+  return res.json();
+}
+
+export async function fetchAgent(id: string): Promise<AgentInfo> {
+  const res = await fetch(`${BASE}/agents/${id}`);
   return res.json();
 }
 

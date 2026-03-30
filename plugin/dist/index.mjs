@@ -20818,6 +20818,7 @@ var agentId = null;
 var agentApiKey = null;
 var sseAbort = null;
 var sseRetryDelay = 1e3;
+var lastEventId = null;
 function saveLocalConfig(config2) {
   fs.writeFileSync(AGENT_CONFIG, JSON.stringify(config2, null, 2), "utf-8");
 }
@@ -21233,16 +21234,19 @@ async function pushChannel(content, meta3) {
 }
 function parseSSEBlock(block) {
   let event = "";
+  let id;
   const dataLines = [];
   for (const line of block.split("\n")) {
     if (line.startsWith("event:")) {
       event = line.slice(6).trim();
     } else if (line.startsWith("data:")) {
       dataLines.push(line.slice(5).trimStart());
+    } else if (line.startsWith("id:")) {
+      id = line.slice(3).trim();
     }
   }
   if (!event || dataLines.length === 0) return null;
-  return { event, data: dataLines.join("\n") };
+  return { event, data: dataLines.join("\n"), id };
 }
 function backoffDelay() {
   const jitter = 1 + (Math.random() * 0.4 - 0.2);
@@ -21350,7 +21354,9 @@ async function connectSSE(id) {
   const { signal } = sseAbort;
   try {
     const sseUrl = agentApiKey ? `${SERVICE_URL}/events/${id}?token=${encodeURIComponent(agentApiKey)}` : `${SERVICE_URL}/events/${id}`;
-    const res = await fetch(sseUrl, { signal });
+    const sseHeaders = {};
+    if (lastEventId) sseHeaders["Last-Event-ID"] = lastEventId;
+    const res = await fetch(sseUrl, { signal, headers: sseHeaders });
     if (res.status === 401 || res.status === 403) {
       console.error(`[swarm] SSE auth failed (${res.status}) \u2014 stopping reconnect`);
       await pushChannel(
@@ -21373,6 +21379,7 @@ async function connectSSE(id) {
       for (const part of parts) {
         const parsed = parseSSEBlock(part);
         if (!parsed) continue;
+        if (parsed.id) lastEventId = parsed.id;
         let data;
         try {
           data = JSON.parse(parsed.data);

@@ -14,6 +14,7 @@ let agentId: string | null = null;
 let agentApiKey: string | null = null;
 let sseAbort: AbortController | null = null;
 let sseRetryDelay = 1000; // Exponential backoff: 1s → 30s cap
+let lastEventId: string | null = null;
 
 // ── Local Config ───────────────────────────────────────────────
 
@@ -474,8 +475,9 @@ async function pushChannel(content: string, meta: Record<string, string>): Promi
 
 // ── SSE Connection to Service ───────────────────────────────────
 
-function parseSSEBlock(block: string): { event: string; data: string } | null {
+function parseSSEBlock(block: string): { event: string; data: string; id?: string } | null {
   let event = "";
+  let id: string | undefined;
   const dataLines: string[] = [];
 
   for (const line of block.split("\n")) {
@@ -483,12 +485,14 @@ function parseSSEBlock(block: string): { event: string; data: string } | null {
       event = line.slice(6).trim();
     } else if (line.startsWith("data:")) {
       dataLines.push(line.slice(5).trimStart());
+    } else if (line.startsWith("id:")) {
+      id = line.slice(3).trim();
     }
-    // Ignore id:, retry:, comments (:), and unknown fields
+    // Ignore retry:, comments (lines starting with :), and unknown fields
   }
 
   if (!event || dataLines.length === 0) return null;
-  return { event, data: dataLines.join("\n") };
+  return { event, data: dataLines.join("\n"), id };
 }
 
 function backoffDelay(): number {
@@ -601,7 +605,9 @@ async function connectSSE(id: string): Promise<void> {
     const sseUrl = agentApiKey
       ? `${SERVICE_URL}/events/${id}?token=${encodeURIComponent(agentApiKey)}`
       : `${SERVICE_URL}/events/${id}`;
-    const res = await fetch(sseUrl, { signal });
+    const sseHeaders: Record<string, string> = {};
+    if (lastEventId) sseHeaders["Last-Event-ID"] = lastEventId;
+    const res = await fetch(sseUrl, { signal, headers: sseHeaders });
 
     // Stop retrying on auth errors — re-register needed
     if (res.status === 401 || res.status === 403) {
@@ -633,6 +639,8 @@ async function connectSSE(id: string): Promise<void> {
       for (const part of parts) {
         const parsed = parseSSEBlock(part);
         if (!parsed) continue;
+
+        if (parsed.id) lastEventId = parsed.id;
 
         let data: unknown;
         try {

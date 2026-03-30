@@ -320,7 +320,7 @@ app.post("/messages/broadcast", requireAuth, requireSenderMatch, (req, res) => {
 // Create task — requireAuth, sender must be connected to receiver
 app.post("/tasks", requireAuth, (req, res) => {
   const { toAgent, title, contextId, ttlSeconds, metadata } = req.body;
-  const fromAgent = req.authAgent?.isAdmin ? req.body.fromAgent : req.authAgent?.id;
+  const fromAgent = req.authAgent?.isAdmin ? req.body.fromAgent : (req.authAgent?.id || req.body.fromAgent);
   if (!fromAgent || !toAgent) {
     res.status(400).json({ error: "fromAgent and toAgent required" });
     return;
@@ -346,7 +346,7 @@ app.get("/tasks/:id", requireAuth, (req, res) => {
     res.status(404).json({ error: "Task not found" });
     return;
   }
-  if (!req.authAgent?.isAdmin && req.authAgent?.id !== task.fromAgent && req.authAgent?.id !== task.toAgent) {
+  if (getAuthMode() !== "off" && !req.authAgent?.isAdmin && req.authAgent?.id !== task.fromAgent && req.authAgent?.id !== task.toAgent) {
     res.status(403).json({ error: "Access denied — only sender, receiver, or admin can view this task" });
     return;
   }
@@ -360,7 +360,7 @@ app.patch("/tasks/:id", requireAuth, (req, res) => {
     res.status(404).json({ error: "Task not found" });
     return;
   }
-  if (!req.authAgent?.isAdmin && req.authAgent?.id !== task.toAgent && req.authAgent?.id !== task.fromAgent) {
+  if (getAuthMode() !== "off" && !req.authAgent?.isAdmin && req.authAgent?.id !== task.toAgent && req.authAgent?.id !== task.fromAgent) {
     res.status(403).json({ error: "Only assigned agent, sender, or admin can update task status" });
     return;
   }
@@ -388,8 +388,8 @@ app.post("/tasks/:id/messages", requireAuth, (req, res) => {
     res.status(404).json({ error: "Task not found" });
     return;
   }
-  const agentId = req.authAgent?.id;
-  if (!req.authAgent?.isAdmin && agentId !== task.fromAgent && agentId !== task.toAgent) {
+  const agentId = req.authAgent?.id || req.body.agentId || req.body.from;
+  if (getAuthMode() !== "off" && !req.authAgent?.isAdmin && agentId !== task.fromAgent && agentId !== task.toAgent) {
     res.status(403).json({ error: "Only sender or receiver can add messages" });
     return;
   }
@@ -416,7 +416,7 @@ app.post("/tasks/:id/artifacts", requireAuth, (req, res) => {
     res.status(404).json({ error: "Task not found" });
     return;
   }
-  if (!req.authAgent?.isAdmin && req.authAgent?.id !== task.toAgent && req.authAgent?.id !== task.fromAgent) {
+  if (getAuthMode() !== "off" && !req.authAgent?.isAdmin && req.authAgent?.id !== task.toAgent && req.authAgent?.id !== task.fromAgent) {
     res.status(403).json({ error: "Only sender, receiver, or admin can add artifacts" });
     return;
   }
@@ -454,7 +454,7 @@ app.delete("/tasks/:id", requireAuth, (req, res) => {
     res.status(404).json({ error: "Task not found" });
     return;
   }
-  if (!req.authAgent?.isAdmin && req.authAgent?.id !== task.fromAgent) {
+  if (getAuthMode() !== "off" && !req.authAgent?.isAdmin && req.authAgent?.id !== task.fromAgent) {
     res.status(403).json({ error: "Only sender or admin can cancel a task" });
     return;
   }

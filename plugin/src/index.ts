@@ -47,7 +47,7 @@ const server = new Server(
     instructions: [
       "You are connected to the Agent Swarm.",
       "Messages from other agents arrive as notifications automatically (fire and forget).",
-      "Available tools: register, whoami, update_profile, unregister, list_agents, discover, send_message, broadcast, set_status.",
+      "Available tools: register, whoami, update_profile, unregister, list_agents, discover, send_message, broadcast, set_status, create_task, update_task, reply_task, list_tasks, get_task.",
       "You must call 'register' first (unless auto-connected). You can only communicate with agents you are connected to in the topology.",
       "When registering, include ALL your capabilities: installed skills, MCPs, workspace context, languages, frameworks — everything that makes you useful.",
     ].join(" "),
@@ -146,6 +146,74 @@ const TOOLS = [
         },
       },
       required: ["status"],
+    },
+  },
+  {
+    name: "create_task",
+    description: "Create a task and assign it to another agent. The target agent will be notified.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        to: { type: "string", description: "Agent ID to assign the task to" },
+        content: { type: "string", description: "Task description — what needs to be done" },
+        title: { type: "string", description: "Short task title (optional)" },
+        contextId: { type: "string", description: "Group related tasks under a context ID (optional)" },
+      },
+      required: ["to", "content"],
+    },
+  },
+  {
+    name: "update_task",
+    description: "Update the status of a task assigned to you. Optionally include a message.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        taskId: { type: "string", description: "Task ID to update" },
+        status: {
+          type: "string",
+          enum: ["working", "completed", "failed", "input-required", "canceled"],
+          description: "New task status",
+        },
+        content: { type: "string", description: "Optional message explaining the status change" },
+      },
+      required: ["taskId", "status"],
+    },
+  },
+  {
+    name: "reply_task",
+    description: "Send a message on a task thread (multi-turn conversation).",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        taskId: { type: "string", description: "Task ID to reply to" },
+        content: { type: "string", description: "Reply message content" },
+      },
+      required: ["taskId", "content"],
+    },
+  },
+  {
+    name: "list_tasks",
+    description: "List tasks. Filter by role: 'assigned' (tasks given to you), 'created' (tasks you created), 'active' (non-terminal tasks), or 'all'.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        filter: {
+          type: "string",
+          enum: ["assigned", "created", "active", "all"],
+          description: "Filter tasks (default: active)",
+        },
+      },
+    },
+  },
+  {
+    name: "get_task",
+    description: "Get full task details including messages and artifacts.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        taskId: { type: "string", description: "Task ID to retrieve" },
+      },
+      required: ["taskId"],
     },
   },
 ];
@@ -273,6 +341,54 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         return text(`Status set to "${status}".`);
       }
 
+      case "create_task": {
+        if (!agentId) return text("You must register first.");
+        const { to, content, title, contextId } = args as { to: string; content: string; title?: string; contextId?: string };
+        const body: Record<string, string> = { to, content };
+        if (title) body.title = title;
+        if (contextId) body.contextId = contextId;
+        const task = await api("POST", "/tasks", body) as { id: string; status: string };
+        return text(`Task created: ${task.id} (status: ${task.status}). Assigned to ${to}.`);
+      }
+
+      case "update_task": {
+        if (!agentId) return text("You must register first.");
+        const { taskId, status: taskStatus, content } = args as { taskId: string; status: string; content?: string };
+        await api("PATCH", `/tasks/${taskId}`, { status: taskStatus });
+        if (content) {
+          await api("POST", `/tasks/${taskId}/messages`, { content });
+        }
+        return text(`Task ${taskId} updated to "${taskStatus}".${content ? " Message added." : ""}`);
+      }
+
+      case "reply_task": {
+        if (!agentId) return text("You must register first.");
+        const { taskId, content } = args as { taskId: string; content: string };
+        await api("POST", `/tasks/${taskId}/messages`, { content });
+        return text(`Reply sent on task ${taskId}.`);
+      }
+
+      case "list_tasks": {
+        if (!agentId) return text("You must register first.");
+        const { filter } = args as { filter?: string };
+        let query = "";
+        switch (filter) {
+          case "assigned": query = `?to=${agentId}`; break;
+          case "created": query = `?from=${agentId}`; break;
+          case "active": query = `?active=true&agent=${agentId}`; break;
+          default: query = `?agent=${agentId}`; break;
+        }
+        const tasks = await api("GET", `/tasks${query}`);
+        return text(JSON.stringify(tasks, null, 2));
+      }
+
+      case "get_task": {
+        if (!agentId) return text("You must register first.");
+        const { taskId } = args as { taskId: string };
+        const task = await api("GET", `/tasks/${taskId}`);
+        return text(JSON.stringify(task, null, 2));
+      }
+
       default:
         return text(`Unknown tool: ${name}`);
     }
@@ -391,6 +507,32 @@ async function handleSSEEvent(event: string, data: unknown): Promise<void> {
         { event_type: "properties_updated" }
       );
       break;
+    case "task_created":
+      await pushChannel(
+        `New task from ${d.from}: "${d.title || "(untitled)"}" (${d.id}, status: ${d.status})\n${d.content}`,
+        { event_type: "task_created", task_id: sanitizeKey(d.id), from: sanitizeKey(d.from) }
+      );
+      break;
+    case "task_updated":
+      await pushChannel(
+        `Task ${d.id} updated to "${d.status}"${d.updatedBy ? ` by ${d.updatedBy}` : ""}.${d.content ? ` Message: ${d.content}` : ""}`,
+        { event_type: "task_updated", task_id: sanitizeKey(d.id) }
+      );
+      break;
+    case "task_message":
+      await pushChannel(
+        `Task ${d.taskId} — message from ${d.from}: ${d.content}`,
+        { event_type: "task_message", task_id: sanitizeKey(d.taskId), from: sanitizeKey(d.from) }
+      );
+      break;
+    case "task_artifact": {
+      const art = (data as Record<string, unknown>).artifact as Record<string, string>;
+      await pushChannel(
+        `Task ${d.taskId} — new artifact: "${art.name}" (${art.mimeType})`,
+        { event_type: "task_artifact", task_id: sanitizeKey(d.taskId) }
+      );
+      break;
+    }
     // connected, heartbeat, and unknown events are silently ignored
   }
 }

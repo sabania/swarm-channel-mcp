@@ -525,6 +525,14 @@ async function handleSSEEvent(event: string, data: unknown): Promise<void> {
         { event_type: "task_message", task_id: sanitizeKey(d.taskId), from: sanitizeKey(d.from) }
       );
       break;
+    case "task_artifact": {
+      const art = (data as Record<string, unknown>).artifact as Record<string, string>;
+      await pushChannel(
+        `Task ${d.taskId} — new artifact: "${art.name}" (${art.mimeType})`,
+        { event_type: "task_artifact", task_id: sanitizeKey(d.taskId) }
+      );
+      break;
+    }
     // connected, heartbeat, and unknown events are silently ignored
   }
 }

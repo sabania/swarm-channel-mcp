@@ -21293,6 +21293,14 @@ ${d.content}`,
         { event_type: "task_message", task_id: sanitizeKey(d.taskId), from: sanitizeKey(d.from) }
       );
       break;
+    case "task_artifact": {
+      const art = data.artifact;
+      await pushChannel(
+        `Task ${d.taskId} \u2014 new artifact: "${art.name}" (${art.mimeType})`,
+        { event_type: "task_artifact", task_id: sanitizeKey(d.taskId) }
+      );
+      break;
+    }
   }
 }
 async function connectSSE(id) {

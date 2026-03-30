@@ -118,7 +118,7 @@ app.post("/agents", async (req, res) => {
     }
   }
 
-  const agent = registerAgent({ id, name, description, cwd, autoconnect });
+  const agent = registerAgent({ id, name, description, cwd, autoconnect, capabilities: req.body.capabilities });
 
   // Generate and store API key (even in off mode — forward-compatible)
   let apiKey: string | undefined;
@@ -235,7 +235,22 @@ app.get("/agents/:id", requireAuth, (req, res) => {
 });
 
 app.get("/agents/:id/connections", requireAuth, (req, res) => {
-  const connected = getConnectedAgents(param(req, "id"));
+  let connected = getConnectedAgents(param(req, "id"));
+
+  // Capability filtering: ?skills=X,Y&domains=Z
+  const skillsFilter = typeof req.query.skills === "string" ? req.query.skills.split(",") : null;
+  const domainsFilter = typeof req.query.domains === "string" ? req.query.domains.split(",") : null;
+
+  if (skillsFilter || domainsFilter) {
+    connected = connected.filter((agent) => {
+      const full = getAgent(agent.id);
+      if (!full?.capabilities) return false;
+      if (skillsFilter && !skillsFilter.some((s) => full.capabilities?.skills?.includes(s))) return false;
+      if (domainsFilter && !domainsFilter.some((d) => full.capabilities?.domains?.includes(d))) return false;
+      return true;
+    });
+  }
+
   res.json(connected);
 });
 

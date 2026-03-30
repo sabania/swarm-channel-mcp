@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import type { Response } from "express";
-import { DEFAULT_LAUNCH_CMD, type AgentInfo, type AgentPublicView, type SwarmTopology } from "./types.js";
+import { DEFAULT_LAUNCH_CMD, type AgentInfo, type AgentCapabilities, type AgentPublicView, type SwarmTopology } from "./types.js";
 
 // ── Persistence ─────────────────────────────────────────────────
 
@@ -305,6 +305,7 @@ export function registerAgent(info: {
   publicDescription?: string;
   cwd?: string;
   autoconnect?: boolean;
+  capabilities?: AgentCapabilities;
 }): AgentInfo {
   const existing = agents.get(info.id);
   const now = new Date().toISOString();
@@ -318,6 +319,7 @@ export function registerAgent(info: {
     autoconnect: info.autoconnect ?? true,
     launchCommand: existing?.launchCommand || DEFAULT_LAUNCH_CMD,
     status: "available",
+    capabilities: info.capabilities ?? existing?.capabilities,
     registeredAt: existing?.registeredAt || now,
     lastSeen: now,
   };
@@ -423,7 +425,7 @@ export function updateAgent(agentId: string, updates: Partial<Pick<AgentInfo, "n
   const idChanged = newId && newId !== agentId;
 
   // Apply only whitelisted fields
-  const allowed: (keyof AgentInfo)[] = ["name", "description", "publicDescription", "cwd", "autoconnect", "launchCommand"];
+  const allowed: (keyof AgentInfo)[] = ["name", "description", "publicDescription", "cwd", "autoconnect", "launchCommand", "capabilities"];
   for (const key of allowed) {
     if (key in updates && updates[key as keyof typeof updates] !== undefined) {
       (agent as any)[key] = updates[key as keyof typeof updates];

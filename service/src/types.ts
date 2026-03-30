@@ -1,5 +1,14 @@
 export const DEFAULT_LAUNCH_CMD = "claude --continue --dangerously-load-development-channels plugin:swarm@swarm-channel";
 
+export interface AgentCapabilities {
+  skills?: string[];
+  languages?: string[];
+  frameworks?: string[];
+  tools?: string[];
+  mcps?: string[];
+  domains?: string[];
+}
+
 export interface AgentInfo {
   id: string;
   name: string;
@@ -9,6 +18,7 @@ export interface AgentInfo {
   autoconnect: boolean;
   launchCommand: string;       // customizable per agent
   status: "available" | "busy" | "offline";
+  capabilities?: AgentCapabilities;
   registeredAt: string;
   lastSeen: string;
 }

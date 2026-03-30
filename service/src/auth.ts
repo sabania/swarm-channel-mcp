@@ -124,3 +124,14 @@ export function validateAdminKey(rawKey: string): boolean {
   if (adminKeyHash.length !== incoming.length) return false;
   return crypto.timingSafeEqual(Buffer.from(adminKeyHash, "hex"), Buffer.from(incoming, "hex"));
 }
+
+/** Rotate admin key. Returns new raw key (shown once). */
+export function rotateAdminKey(): string {
+  const rawKey = `swarm_admin_${crypto.randomBytes(32).toString("hex")}`;
+  adminKeyHash = hashKey(rawKey);
+  ensureDir();
+  const tmp = ADMIN_KEY_FILE + ".tmp";
+  writeFileSync(tmp, adminKeyHash, "utf-8");
+  renameSync(tmp, ADMIN_KEY_FILE);
+  return rawKey;
+}

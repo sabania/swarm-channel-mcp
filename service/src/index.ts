@@ -2,7 +2,7 @@ import express from "express";
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { exec } from "node:child_process";
+import { spawn } from "node:child_process";
 import os from "node:os";
 import type { Response, NextFunction } from "express";
 import helmet from "helmet";
@@ -48,11 +48,12 @@ import {
   validateMessageContent,
 } from "./store.js";
 import { isValidTransition, type TaskStatus } from "./types.js";
-import { generateApiKey, storeKey, removeKey, remapKey, initAdminKey, hasKey } from "./auth.js";
+import { generateApiKey, storeKey, removeKey, remapKey, initAdminKey, hasKey, rotateAdminKey } from "./auth.js";
 import { authenticate, requireAuth, requireAdmin, requireSelfOrAdmin, requireSenderMatch, getAuthMode } from "./middleware.js";
 import {
   createTask, getTask, getTaskDetail, updateTaskStatus, addTaskMessage, addTaskArtifact,
   listTasks, deleteTask, getPendingTasksForAgent, startCleanupTimer, closeDb, getTaskMetrics, checkDbHealth,
+  logAudit, queryAuditLog, checkDbIntegrity, backupDb,
 } from "./db.js";
 import { areConnected } from "./store.js";
 
@@ -62,14 +63,16 @@ const HOST = process.env.HOST || "127.0.0.1";
 const app = express();
 app.use(express.json({ limit: "1mb" }));
 
-// ── CORS ────────────────────────────────────────────────────────
+// ── CORS (set SWARM_CORS_ORIGINS=http://localhost:5173 for dev) ──
 
-const CORS_ORIGINS = process.env.SWARM_CORS_ORIGINS || "*";
+const CORS_ORIGINS = process.env.SWARM_CORS_ORIGINS || "";
 
 app.use((_req, res, next) => {
-  res.header("Access-Control-Allow-Origin", CORS_ORIGINS);
-  res.header("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS");
-  res.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  if (CORS_ORIGINS) {
+    res.header("Access-Control-Allow-Origin", CORS_ORIGINS);
+    res.header("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS");
+    res.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  }
   if (_req.method === "OPTIONS") {
     res.sendStatus(204);
     return;
@@ -153,6 +156,7 @@ app.post("/agents/create", requireAdmin, (req, res) => {
     return;
   }
   logger.info({ event: "agent_created", agentId: id, name });
+  logAudit(req.authAgent?.id ?? "__admin__", "agent_created", id, { name }, req.ip ?? undefined);
   res.json(agent);
 });
 
@@ -187,6 +191,7 @@ app.post("/agents", async (req, res) => {
   }
 
   logger.info({ event: "agent_registered", agentId: id, name, newKey: !!apiKey });
+  logAudit(id, "agent_registered", id, { name }, req.ip ?? undefined);
   res.json(apiKey ? { agent, apiKey } : { agent });
 });
 
@@ -233,12 +238,17 @@ app.delete("/agents/:id", requireAdmin, async (req, res) => {
   if (ok) {
     await removeKey(param(req, "id"));
     logger.info({ event: "agent_removed", agentId: param(req, "id") });
+    logAudit(req.authAgent?.id ?? "__admin__", "agent_removed", param(req, "id"), undefined, req.ip ?? undefined);
   }
   res.json({ ok });
 });
 
 // Update agent properties — Admin only
 app.patch("/agents/:id", requireAdmin, async (req, res) => {
+  if (req.body.launchCommand) {
+    const cmdErr = validateLaunchCommand(req.body.launchCommand);
+    if (cmdErr) { res.status(400).json({ error: cmdErr }); return; }
+  }
   const newId = req.body.id;
   if (newId && newId !== param(req, "id")) {
     const idErr = validateAgentId(newId);
@@ -338,6 +348,7 @@ app.post("/edges", requireAdmin, (req, res) => {
   }
   const ok = addEdge(from, to);
   logger.info({ event: ok ? "edge_added" : "edge_exists", from, to });
+  if (ok) logAudit(req.authAgent?.id ?? "__admin__", "edge_added", `${from}↔${to}`, undefined, req.ip ?? undefined);
   res.json({ ok });
 });
 
@@ -348,7 +359,10 @@ app.delete("/edges", requireAdmin, (req, res) => {
     return;
   }
   const ok = removeEdge(from, to);
-  if (ok) logger.info({ event: "edge_removed", from, to });
+  if (ok) {
+    logger.info({ event: "edge_removed", from, to });
+    logAudit(req.authAgent?.id ?? "__admin__", "edge_removed", `${from}↔${to}`, undefined, req.ip ?? undefined);
+  }
   res.json({ ok });
 });
 
@@ -560,23 +574,32 @@ function TASK_TRANSITIONS_FOR_ERROR(status: TaskStatus): TaskStatus[] {
 
 // ── Launch Agent — Admin only ───────────────────────────────────
 
+const SHELL_METACHARACTERS = /[|;&$`\\><(){}!]/;
+
+export function validateLaunchCommand(cmd: string): string | null {
+  if (!cmd.includes("claude")) return "Launch command must include 'claude'";
+  if (SHELL_METACHARACTERS.test(cmd)) return "Launch command contains forbidden shell metacharacters";
+  if (cmd.length > 512) return "Launch command too long (max 512 chars)";
+  return null;
+}
+
 function launchTerminal(cwd: string, command: string): Promise<void> {
   return new Promise((resolve, reject) => {
     const platform = os.platform();
-    let shellCmd: string;
+    const args = command.split(/\s+/);
 
+    let proc;
     if (platform === "win32") {
-      shellCmd = `start cmd /k "cd /d "${cwd}" && ${command}"`;
+      proc = spawn("cmd", ["/c", "start", "cmd", "/k", ...args], { cwd, detached: true, stdio: "ignore" });
     } else if (platform === "darwin") {
-      shellCmd = `osascript -e 'tell application "Terminal" to do script "cd ${cwd.replace(/'/g, "\\'")} && ${command}"'`;
+      proc = spawn("open", ["-a", "Terminal", "--args", ...args], { cwd, detached: true, stdio: "ignore" });
     } else {
-      shellCmd = `x-terminal-emulator -e bash -c "cd '${cwd}' && ${command}; exec bash" 2>/dev/null || gnome-terminal -- bash -c "cd '${cwd}' && ${command}; exec bash" 2>/dev/null || xterm -e bash -c "cd '${cwd}' && ${command}; exec bash"`;
+      proc = spawn(args[0], args.slice(1), { cwd, detached: true, stdio: "ignore" });
     }
 
-    exec(shellCmd, (err) => {
-      if (err) reject(err);
-      else resolve();
-    });
+    proc.on("error", reject);
+    proc.unref();
+    resolve();
   });
 }
 
@@ -598,7 +621,14 @@ app.post("/agents/:id/launch", requireAdmin, async (req, res) => {
   const configPath = path.join(agent.cwd, ".swarm-agent.json");
   await fs.writeFile(configPath, JSON.stringify({ id: agent.id, autoconnect: true }, null, 2));
 
-  await launchTerminal(agent.cwd, agent.launchCommand || DEFAULT_LAUNCH_CMD);
+  const cmd = agent.launchCommand || DEFAULT_LAUNCH_CMD;
+  const cmdErr = validateLaunchCommand(cmd);
+  if (cmdErr) {
+    res.status(400).json({ error: cmdErr });
+    return;
+  }
+
+  await launchTerminal(agent.cwd, cmd);
   logger.info({ event: "agent_launched", agentId: param(req, "id"), cwd: agent.cwd });
   res.json({ ok: true, cwd: agent.cwd });
 });
@@ -666,7 +696,7 @@ app.get("/health", (_req, res) => {
     agents: getActiveAgents().length,
     totalAgents: getAgents().length,
     uptime: process.uptime(),
-    version: "0.3.0",
+    version: "0.4.0",
   });
 });
 
@@ -683,8 +713,29 @@ app.get("/metrics", (_req, res) => {
     sse: sseMetrics,
     auth: { mode: getAuthMode() },
     uptime: process.uptime(),
-    version: "0.3.0",
+    version: "0.4.0",
   });
+});
+
+// ── Audit Log — Admin only ──────────────────────────────────────
+
+app.get("/audit", requireAdmin, (req, res) => {
+  const entries = queryAuditLog({
+    after: typeof req.query.after === "string" ? req.query.after : undefined,
+    actor: typeof req.query.actor === "string" ? req.query.actor : undefined,
+    action: typeof req.query.action === "string" ? req.query.action : undefined,
+    limit: typeof req.query.limit === "string" ? parseInt(req.query.limit, 10) : 100,
+  });
+  res.json(entries);
+});
+
+// ── Admin Key Rotation ──────────────────────────────────────────
+
+app.post("/admin/rotate-key", requireAdmin, (req, res) => {
+  const newKey = rotateAdminKey();
+  logAudit(req.authAgent?.id ?? "__admin__", "admin_key_rotated", undefined, undefined, req.ip ?? undefined);
+  logger.info({ event: "admin_key_rotated" });
+  res.json({ apiKey: newKey });
 });
 
 // ── Error Handling ──────────────────────────────────────────────
@@ -699,10 +750,21 @@ app.use((err: Error, _req: express.Request, res: Response, _next: NextFunction) 
 // Initialize admin key
 const adminKey = initAdminKey();
 
+// ── Startup Checks ──────────────────────────────────────────────
+
+const integrityResult = checkDbIntegrity();
+if (integrityResult !== "ok") {
+  logger.warn({ event: "db_integrity_warning", result: integrityResult });
+  backupDb(); // Create backup before continuing
+}
+
 startCleanupTimer();
 
+// Scheduled backup every 6 hours
+setInterval(() => backupDb(), 6 * 60 * 60 * 1000);
+
 const server = app.listen(PORT, HOST, () => {
-  logger.info({ event: "server_started", host: HOST, port: PORT, authMode: getAuthMode(), version: "0.3.0" });
+  logger.info({ event: "server_started", host: HOST, port: PORT, authMode: getAuthMode(), version: "0.4.0" });
   if (adminKey) {
     logger.info({ event: "admin_key_created", key: adminKey }, "ADMIN API KEY (save this — shown only once)");
   }

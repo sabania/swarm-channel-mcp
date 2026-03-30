@@ -58,6 +58,19 @@ db.exec(`
   );
 
   CREATE INDEX IF NOT EXISTS idx_task_artifacts_task_id ON task_artifacts(task_id);
+
+  CREATE TABLE IF NOT EXISTS audit_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT NOT NULL,
+    actor TEXT NOT NULL,
+    action TEXT NOT NULL,
+    target TEXT,
+    details TEXT,
+    ip TEXT
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_log(timestamp);
+  CREATE INDEX IF NOT EXISTS idx_audit_actor ON audit_log(actor);
 `);
 
 // ── Row → Object Mappers ────────────────────────────────────────
@@ -302,6 +315,63 @@ export function getTaskMetrics(): { total: number; byStatus: Record<string, numb
     total += row.count;
   }
   return { total, byStatus };
+}
+
+// ── Audit Log ───────────────────────────────────────────────────
+
+const insertAuditStmt = db.prepare(`
+  INSERT INTO audit_log (timestamp, actor, action, target, details, ip) VALUES (?, ?, ?, ?, ?, ?)
+`);
+
+export function logAudit(actor: string, action: string, target?: string, details?: Record<string, unknown>, ip?: string): void {
+  insertAuditStmt.run(new Date().toISOString(), actor, action, target ?? null, details ? JSON.stringify(details) : null, ip ?? null);
+}
+
+export interface AuditEntry {
+  id: number;
+  timestamp: string;
+  actor: string;
+  action: string;
+  target: string | null;
+  details: Record<string, unknown> | null;
+  ip: string | null;
+}
+
+export function queryAuditLog(opts: { after?: string; actor?: string; action?: string; limit?: number }): AuditEntry[] {
+  const conditions: string[] = [];
+  const params: any[] = [];
+  if (opts.after) { conditions.push("timestamp > ?"); params.push(opts.after); }
+  if (opts.actor) { conditions.push("actor = ?"); params.push(opts.actor); }
+  if (opts.action) { conditions.push("action = ?"); params.push(opts.action); }
+  const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+  const limit = Math.min(opts.limit ?? 100, 1000);
+  const rows = db.prepare(`SELECT * FROM audit_log ${where} ORDER BY id DESC LIMIT ?`).all(...params, limit) as any[];
+  return rows.map((r) => ({
+    id: r.id,
+    timestamp: r.timestamp,
+    actor: r.actor,
+    action: r.action,
+    target: r.target,
+    details: r.details ? JSON.parse(r.details) : null,
+    ip: r.ip,
+  }));
+}
+
+// ── DB Integrity ────────────────────────────────────────────────
+
+export function checkDbIntegrity(): string {
+  const result = db.pragma("integrity_check") as { integrity_check: string }[];
+  return result[0]?.integrity_check ?? "unknown";
+}
+
+export function backupDb(): void {
+  try {
+    const backupPath = DB_PATH + ".backup";
+    db.backup(backupPath);
+    logger.info({ event: "db_backup", path: backupPath });
+  } catch (err) {
+    logger.error({ err }, "Database backup failed");
+  }
 }
 
 /** Check database health */

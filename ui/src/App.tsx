@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ReactFlow,
   Background,
@@ -15,7 +15,8 @@ import "@xyflow/react/dist/style.css";
 import { AgentNode } from "./AgentNode";
 import { AgentPanel } from "./AgentPanel";
 import { CreateAgentDialog } from "./CreateAgentDialog";
-import { fetchTopology, addEdge, removeEdge, type AgentInfo } from "./api";
+import { AuthDialog } from "./AuthDialog";
+import { fetchTopology, addEdge, removeEdge, setAdminToken, setOnAuthRequired, type AgentInfo } from "./api";
 
 const nodeTypes = { agent: AgentNode };
 
@@ -55,6 +56,16 @@ export default function App() {
   const [allAgents, setAllAgents] = useState<Record<string, AgentInfo>>({});
   const [selectedAgent, setSelectedAgent] = useState<string | null>(null);
   const [showCreateDialog, setShowCreateDialog] = useState(false);
+  const [showAuthDialog, setShowAuthDialog] = useState(false);
+  const authResolveRef = useRef<(() => void) | null>(null);
+
+  useEffect(() => {
+    setOnAuthRequired(() => new Promise<void>((resolve) => {
+      authResolveRef.current = resolve;
+      setShowAuthDialog(true);
+    }));
+    return () => setOnAuthRequired(null);
+  }, []);
 
   const loadTopology = useCallback(async () => {
     const topo = await fetchTopology();
@@ -174,6 +185,19 @@ export default function App() {
           existingIds={Object.keys(allAgents)}
           onClose={() => setShowCreateDialog(false)}
           onCreated={loadTopology}
+        />
+      )}
+      {showAuthDialog && (
+        <AuthDialog
+          onSubmit={(token) => {
+            setAdminToken(token);
+            setShowAuthDialog(false);
+            authResolveRef.current?.();
+          }}
+          onCancel={() => {
+            setShowAuthDialog(false);
+            authResolveRef.current?.();
+          }}
         />
       )}
     </div>

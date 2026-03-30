@@ -48,7 +48,7 @@ const server = new Server(
     instructions: [
       "You are connected to the Agent Swarm.",
       "Messages from other agents arrive as notifications automatically (fire and forget).",
-      "Available tools: register, whoami, update_profile, unregister, list_agents, discover, send_message, broadcast, set_status, create_task, update_task, reply_task, list_tasks, get_task.",
+      "Available tools: register, whoami, update_profile, unregister, list_agents, discover, send_message, broadcast, set_status, create_task, update_task, reply_task, list_tasks, get_task, request_connection, list_pending_connections, accept_connection, decline_connection, swarm_connect.",
       "You must call 'register' first (unless auto-connected). You can only communicate with agents you are connected to in the topology.",
       "When registering, include ALL your capabilities: installed skills, MCPs, workspace context, languages, frameworks — everything that makes you useful.",
     ].join(" "),
@@ -239,6 +239,56 @@ const TOOLS = [
         taskId: { type: "string", description: "Task ID to retrieve" },
       },
       required: ["taskId"],
+    },
+  },
+  {
+    name: "request_connection",
+    description: "Request a connection to another agent. The target agent can accept or decline.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        to: { type: "string", description: "Agent ID to connect with" },
+        reason: { type: "string", description: "Why you want to connect (optional)" },
+      },
+      required: ["to"],
+    },
+  },
+  {
+    name: "list_pending_connections",
+    description: "List pending connection requests (incoming and outgoing).",
+    inputSchema: { type: "object" as const, properties: {} },
+  },
+  {
+    name: "accept_connection",
+    description: "Accept a pending connection request.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        requestId: { type: "string", description: "Connection request ID to accept" },
+      },
+      required: ["requestId"],
+    },
+  },
+  {
+    name: "decline_connection",
+    description: "Decline a pending connection request.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        requestId: { type: "string", description: "Connection request ID to decline" },
+      },
+      required: ["requestId"],
+    },
+  },
+  {
+    name: "swarm_connect",
+    description: "Connect to a swarm using an invite URL. Downloads credentials and connects automatically.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        inviteUrl: { type: "string", description: "Invite URL provided by the swarm admin" },
+      },
+      required: ["inviteUrl"],
     },
   },
 ];
@@ -444,6 +494,57 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         return text(JSON.stringify(task, null, 2));
       }
 
+      case "request_connection": {
+        if (!agentId) return text("You must register first.");
+        const { to, reason } = args as { to: string; reason?: string };
+        const body: Record<string, string> = { to };
+        if (reason) body.reason = reason;
+        const req = await api("POST", "/connections/request", body) as { id: string; status: string };
+        return text(`Connection request sent to ${to} (${req.id}). Waiting for acceptance.`);
+      }
+
+      case "list_pending_connections": {
+        if (!agentId) return text("You must register first.");
+        const requests = await api("GET", `/connections/requests?agent=${agentId}`);
+        return text(JSON.stringify(requests, null, 2));
+      }
+
+      case "accept_connection": {
+        if (!agentId) return text("You must register first.");
+        const { requestId } = args as { requestId: string };
+        const result = await api("POST", `/connections/requests/${requestId}/accept`) as { from: string; to: string };
+        return text(`Connection accepted. You are now connected to ${result.from === agentId ? result.to : result.from}.`);
+      }
+
+      case "decline_connection": {
+        if (!agentId) return text("You must register first.");
+        const { requestId } = args as { requestId: string };
+        await api("POST", `/connections/requests/${requestId}/decline`);
+        return text(`Connection request ${requestId} declined.`);
+      }
+
+      case "swarm_connect": {
+        const { inviteUrl } = args as { inviteUrl: string };
+        const inviteRes = await fetch(inviteUrl);
+        if (!inviteRes.ok) return text(`Failed to fetch invite: ${inviteRes.statusText}`);
+        const invite = await inviteRes.json() as { url: string; id: string; apiKey: string; name?: string };
+        if (!invite.url || !invite.id || !invite.apiKey) {
+          return text("Invalid invite: missing url, id, or apiKey.");
+        }
+        // Update service URL and credentials
+        agentId = invite.id;
+        agentApiKey = invite.apiKey;
+        saveLocalConfig({ id: invite.id, autoconnect: true, apiKey: invite.apiKey });
+        // Connect to the swarm
+        const headers: Record<string, string> = { "Authorization": `Bearer ${invite.apiKey}` };
+        const connectRes = await fetch(`${invite.url}/agents/${invite.id}/connect`, { method: "POST", headers });
+        if (!connectRes.ok) {
+          return text(`Connected credentials saved but service connect failed: ${connectRes.statusText}. Will auto-connect on next restart.`);
+        }
+        connectSSE(invite.id);
+        return text(`Connected to swarm at ${invite.url} as "${invite.name || invite.id}". Listening for messages.`);
+      }
+
       default:
         return text(`Unknown tool: ${name}`);
     }
@@ -591,6 +692,24 @@ async function handleSSEEvent(event: string, data: unknown): Promise<void> {
       );
       break;
     }
+    case "connection_request":
+      await pushChannel(
+        `Connection request from ${d.from}${d.reason ? `: ${d.reason}` : ""}. Use list_pending_connections and accept_connection/decline_connection to respond.`,
+        { event_type: "connection_request", from: sanitizeKey(d.from), request_id: sanitizeKey(d.id) }
+      );
+      break;
+    case "connection_accepted":
+      await pushChannel(
+        `Connected to ${d.name} (${d.id}). You can now exchange messages and tasks.`,
+        { event_type: "connection_accepted", agent_id: sanitizeKey(d.id) }
+      );
+      break;
+    case "connection_declined":
+      await pushChannel(
+        `Connection declined by ${d.name} (${d.id}).`,
+        { event_type: "connection_declined", agent_id: sanitizeKey(d.id) }
+      );
+      break;
     // connected, heartbeat, and unknown events are silently ignored
   }
 }

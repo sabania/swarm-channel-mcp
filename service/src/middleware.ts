@@ -42,7 +42,8 @@ function extractBearerToken(req: Request): string | null {
  * Does NOT reject — downstream guards decide based on auth mode.
  */
 export function authenticate(req: Request, _res: Response, next: NextFunction): void {
-  const token = extractBearerToken(req);
+  // Support both: Authorization header and ?token= query param (for SSE/EventSource)
+  const token = extractBearerToken(req) || (typeof req.query.token === "string" ? req.query.token : null);
   if (!token) {
     next();
     return;

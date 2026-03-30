@@ -1,5 +1,6 @@
 import type { Request, Response, NextFunction } from "express";
 import { findAgentByKey, validateAdminKey } from "./auth.js";
+import { logger } from "./logger.js";
 
 // ── Auth Mode ───────────────────────────────────────────────────
 
@@ -76,7 +77,7 @@ export function requireAuth(req: Request, res: Response, next: NextFunction): vo
   if (req.authAgent) { next(); return; }
 
   if (mode === "warn") {
-    console.warn(`[auth:warn] Unauthenticated request: ${req.method} ${req.path}`);
+    logger.warn({ event: "auth_unauthenticated", method: req.method, path: req.path });
     next();
     return;
   }
@@ -95,7 +96,7 @@ export function requireAdmin(req: Request, res: Response, next: NextFunction): v
   if (req.authAgent?.isAdmin) { next(); return; }
 
   if (mode === "warn") {
-    console.warn(`[auth:warn] Non-admin request to admin endpoint: ${req.method} ${req.path}`);
+    logger.warn({ event: "auth_non_admin", method: req.method, path: req.path, agentId: req.authAgent?.id });
     next();
     return;
   }
@@ -119,7 +120,7 @@ export function requireSelfOrAdmin(paramName: string) {
     if (req.authAgent && req.authAgent.id === req.params[paramName]) { next(); return; }
 
     if (mode === "warn") {
-      console.warn(`[auth:warn] Agent ${req.authAgent?.id ?? "unknown"} accessing ${req.params[paramName]}'s resource: ${req.method} ${req.path}`);
+      logger.warn({ event: "auth_scope_violation", agentId: req.authAgent?.id, targetId: req.params[paramName], method: req.method, path: req.path });
       next();
       return;
     }
@@ -145,7 +146,7 @@ export function requireSenderMatch(req: Request, res: Response, next: NextFuncti
   if (req.authAgent && req.body?.from === req.authAgent.id) { next(); return; }
 
   if (mode === "warn") {
-    console.warn(`[auth:warn] Sender mismatch: auth=${req.authAgent?.id ?? "none"}, from=${req.body?.from}`);
+    logger.warn({ event: "auth_sender_mismatch", agentId: req.authAgent?.id, from: req.body?.from });
     next();
     return;
   }

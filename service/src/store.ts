@@ -4,6 +4,7 @@ import path from "node:path";
 import os from "node:os";
 import type { Response } from "express";
 import { DEFAULT_LAUNCH_CMD, type AgentInfo, type AgentCapabilities, type AgentPublicView, type SwarmTopology } from "./types.js";
+import { logger } from "./logger.js";
 
 // ── Persistence ─────────────────────────────────────────────────
 
@@ -35,7 +36,7 @@ function saveTopology(): void {
   saveTimer = setTimeout(() => {
     saveTimer = null;
     saveInFlight = writeToDisk().catch((err) => {
-      console.error("Failed to save topology:", err);
+      logger.error({ err }, "Failed to save topology");
     }).finally(() => {
       saveInFlight = null;
     });
@@ -240,6 +241,15 @@ export function closeAllSSE(): void {
     }
   }
   sseConnections.clear();
+}
+
+/** Metrics for /metrics endpoint */
+export function getSSEMetrics(): { activeConnections: number; eventsBuffered: number } {
+  let activeConnections = 0;
+  for (const conns of sseConnections.values()) activeConnections += conns.length;
+  let eventsBuffered = 0;
+  for (const buf of eventBuffers.values()) eventsBuffered += buf.length;
+  return { activeConnections, eventsBuffered };
 }
 
 // ── Graph / Topology ────────────────────────────────────────────

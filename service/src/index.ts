@@ -1,10 +1,14 @@
 import express from "express";
+import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { exec } from "node:child_process";
 import os from "node:os";
 import type { Response, NextFunction } from "express";
+import helmet from "helmet";
+import rateLimit from "express-rate-limit";
 import { DEFAULT_LAUNCH_CMD } from "./types.js";
+import { logger } from "./logger.js";
 
 /** Extract single route param (Express 5 types string | string[]) */
 function param(req: express.Request, name: string): string {
@@ -37,6 +41,7 @@ import {
   isOnline,
   closeAllSSE,
   saveTopologyNow,
+  getSSEMetrics,
   validateAgentId,
   validateAgentName,
   validateDescription,
@@ -47,7 +52,7 @@ import { generateApiKey, storeKey, removeKey, remapKey, initAdminKey, hasKey } f
 import { authenticate, requireAuth, requireAdmin, requireSelfOrAdmin, requireSenderMatch, getAuthMode } from "./middleware.js";
 import {
   createTask, getTask, getTaskDetail, updateTaskStatus, addTaskMessage, addTaskArtifact,
-  listTasks, deleteTask, getPendingTasksForAgent, startCleanupTimer, closeDb,
+  listTasks, deleteTask, getPendingTasksForAgent, startCleanupTimer, closeDb, getTaskMetrics, checkDbHealth,
 } from "./db.js";
 import { areConnected } from "./store.js";
 
@@ -70,6 +75,58 @@ app.use((_req, res, next) => {
     return;
   }
   next();
+});
+
+// ── Security Headers ────────────────────────────────────────────
+
+app.use(helmet({ contentSecurityPolicy: false, crossOriginEmbedderPolicy: false }));
+
+// ── Request-ID Tracking ─────────────────────────────────────────
+
+app.use((req, _res, next) => {
+  (req as any).id = (req.headers["x-request-id"] as string) || crypto.randomUUID();
+  _res.setHeader("X-Request-ID", (req as any).id);
+  next();
+});
+
+// ── Request Logging ─────────────────────────────────────────────
+
+app.use((req, res, next) => {
+  const start = Date.now();
+  res.on("finish", () => {
+    // Skip SSE and health noise
+    if (req.path.startsWith("/events/") || req.path === "/health") return;
+    logger.info({
+      event: "http_request",
+      method: req.method,
+      path: req.path,
+      status: res.statusCode,
+      durationMs: Date.now() - start,
+      requestId: (req as any).id,
+      agentId: req.authAgent?.id,
+    });
+  });
+  next();
+});
+
+// ── Rate Limiting ───────────────────────────────────────────────
+
+const globalLimiter = rateLimit({
+  windowMs: 1000,
+  max: 100,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => req.authAgent?.id || req.ip || "unknown",
+});
+app.use(globalLimiter);
+
+const messageLimiter = rateLimit({
+  windowMs: 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => req.authAgent?.id || req.ip || "unknown",
+  message: { error: "Too many messages — max 10/second" },
 });
 
 // ── Auth Middleware (runs on all routes) ─────────────────────────
@@ -95,7 +152,7 @@ app.post("/agents/create", requireAdmin, (req, res) => {
     res.status(409).json({ error: `ID "${id}" already exists` });
     return;
   }
-  console.log(`+ Agent created: ${id} (${name}) [offline]`);
+  logger.info({ event: "agent_created", agentId: id, name });
   res.json(agent);
 });
 
@@ -129,7 +186,7 @@ app.post("/agents", async (req, res) => {
     await storeKey(id, apiKey);
   }
 
-  console.log(`+ Agent registered: ${id} (${name})${apiKey ? " [new key issued]" : ""}`);
+  logger.info({ event: "agent_registered", agentId: id, name, newKey: !!apiKey });
   res.json(apiKey ? { agent, apiKey } : { agent });
 });
 
@@ -151,7 +208,7 @@ app.post("/agents/:id/connect", requireAuth, requireSelfOrAdmin("id"), (req, res
   }
 
   const connected = getConnectedAgents(param(req, "id"));
-  console.log(`↑ Agent reconnected: ${param(req, "id")} (${agent.name})`);
+  logger.info({ event: "agent_reconnected", agentId: param(req, "id"), name: agent.name });
 
   // Deliver pending tasks via SSE (deferred so SSE connection is established first)
   const agentIdForPending = param(req, "id");
@@ -163,7 +220,7 @@ app.post("/agents/:id/connect", requireAuth, requireSelfOrAdmin("id"), (req, res
       }
     }
     if (pending.length > 0) {
-      console.log(`📋 Delivered ${pending.length} pending task(s) to ${agentIdForPending}`);
+      logger.info({ event: "pending_tasks_delivered", agentId: agentIdForPending, count: pending.length });
     }
   }, 1000);
 
@@ -175,7 +232,7 @@ app.delete("/agents/:id", requireAdmin, async (req, res) => {
   const ok = removeAgent(param(req, "id"));
   if (ok) {
     await removeKey(param(req, "id"));
-    console.log(`- Agent removed: ${param(req, "id")}`);
+    logger.info({ event: "agent_removed", agentId: param(req, "id") });
   }
   res.json({ ok });
 });
@@ -201,9 +258,9 @@ app.patch("/agents/:id", requireAdmin, async (req, res) => {
   // Remap key if ID changed
   if (newId && newId !== param(req, "id")) {
     await remapKey(param(req, "id"), newId);
-    console.log(`~ Agent renamed: ${param(req, "id")} → ${newId}`);
+    logger.info({ event: "agent_renamed", oldId: param(req, "id"), newId });
   } else {
-    console.log(`~ Agent updated: ${param(req, "id")}`);
+    logger.info({ event: "agent_updated", agentId: param(req, "id") });
   }
   res.json(agent);
 });
@@ -280,7 +337,7 @@ app.post("/edges", requireAdmin, (req, res) => {
     return;
   }
   const ok = addEdge(from, to);
-  console.log(ok ? `🔗 Edge added: ${from} ↔ ${to}` : `Edge already exists: ${from} ↔ ${to}`);
+  logger.info({ event: ok ? "edge_added" : "edge_exists", from, to });
   res.json({ ok });
 });
 
@@ -291,13 +348,13 @@ app.delete("/edges", requireAdmin, (req, res) => {
     return;
   }
   const ok = removeEdge(from, to);
-  if (ok) console.log(`✂ Edge removed: ${from} ↔ ${to}`);
+  if (ok) logger.info({ event: "edge_removed", from, to });
   res.json({ ok });
 });
 
 // ── Messages — Agent+Admin, sender must match ───────────────────
 
-app.post("/messages", requireAuth, requireSenderMatch, (req, res) => {
+app.post("/messages", messageLimiter, requireAuth, requireSenderMatch, (req, res) => {
   const { from, to, content } = req.body;
   if (!from || !to) {
     res.status(400).json({ error: "from, to, content required" });
@@ -312,14 +369,14 @@ app.post("/messages", requireAuth, requireSenderMatch, (req, res) => {
   }
   const result = sendMessage(from, to, content);
   if (result.error) {
-    console.log(`✉ ${from} → ${to} [blocked]: ${result.error}`);
+    logger.info({ event: "message_blocked", from, to, reason: result.error });
   } else {
-    console.log(`✉ ${from} → ${to} [${result.delivered ? "delivered" : "offline"}]: ${content.slice(0, 60)}`);
+    logger.info({ event: "message_sent", from, to, delivered: result.delivered });
   }
   res.json(result);
 });
 
-app.post("/messages/broadcast", requireAuth, requireSenderMatch, (req, res) => {
+app.post("/messages/broadcast", messageLimiter, requireAuth, requireSenderMatch, (req, res) => {
   const { from, content } = req.body;
   if (!from) {
     res.status(400).json({ error: "from, content required" });
@@ -328,14 +385,14 @@ app.post("/messages/broadcast", requireAuth, requireSenderMatch, (req, res) => {
   const contentErr = validateMessageContent(content);
   if (contentErr) { res.status(400).json({ error: contentErr }); return; }
   const delivered = broadcastMessage(from, content);
-  console.log(`📢 ${from} broadcast → ${delivered} delivered`);
+  logger.info({ event: "broadcast_sent", from, delivered });
   res.json({ delivered });
 });
 
 // ── Tasks (A2A-compatible) ──────────────────────────────────────
 
 // Create task — requireAuth, sender must be connected to receiver
-app.post("/tasks", requireAuth, (req, res) => {
+app.post("/tasks", messageLimiter, requireAuth, (req, res) => {
   const { toAgent, title, contextId, ttlSeconds, metadata } = req.body;
   const fromAgent = req.authAgent?.isAdmin ? req.body.fromAgent : (req.authAgent?.id || req.body.fromAgent);
   if (!fromAgent || !toAgent) {
@@ -352,7 +409,7 @@ app.post("/tasks", requireAuth, (req, res) => {
   if (isOnline(toAgent)) {
     pushEvent(toAgent, "task_created", task);
   }
-  console.log(`📋 Task created: ${task.id} (${fromAgent} → ${toAgent})`);
+  logger.info({ event: "task_created", taskId: task.id, fromAgent, toAgent });
   res.status(201).json(task);
 });
 
@@ -394,7 +451,7 @@ app.patch("/tasks/:id", requireAuth, (req, res) => {
       pushEvent(agentId, "task_updated", updated);
     }
   }
-  console.log(`📋 Task ${task.id}: ${task.status} → ${status}`);
+  logger.info({ event: "task_updated", taskId: task.id, from: task.status, to: status });
   res.json(updated);
 });
 
@@ -486,7 +543,7 @@ app.delete("/tasks/:id", requireAuth, (req, res) => {
       }
     }
   }
-  console.log(`📋 Task canceled/deleted: ${task.id}`);
+  logger.info({ event: "task_canceled", taskId: task.id });
   res.json({ ok: true });
 });
 
@@ -542,7 +599,7 @@ app.post("/agents/:id/launch", requireAdmin, async (req, res) => {
   await fs.writeFile(configPath, JSON.stringify({ id: agent.id, autoconnect: true }, null, 2));
 
   await launchTerminal(agent.cwd, agent.launchCommand || DEFAULT_LAUNCH_CMD);
-  console.log(`🚀 Launched agent: ${param(req, "id")} in ${agent.cwd}`);
+  logger.info({ event: "agent_launched", agentId: param(req, "id"), cwd: agent.cwd });
   res.json({ ok: true, cwd: agent.cwd });
 });
 
@@ -569,7 +626,7 @@ app.get("/events/:agentId", requireAuth, requireSelfOrAdmin("agentId"), (req, re
         res.write(`id: ${evt.id}\nevent: ${evt.event}\ndata: ${JSON.stringify(evt.data)}\n\n`);
       }
       if (missed.length > 0) {
-        console.log(`⚡ SSE replayed ${missed.length} events for ${agentId} (after id ${afterId})`);
+        logger.info({ event: "sse_replay", agentId, count: missed.length, afterId });
       }
     }
   }
@@ -577,7 +634,7 @@ app.get("/events/:agentId", requireAuth, requireSelfOrAdmin("agentId"), (req, re
   cancelOfflineTimer(agentId);
 
   addSSE(agentId, res);
-  console.log(`⚡ SSE connected: ${agentId}`);
+  logger.info({ event: "sse_connected", agentId });
 
   // Heartbeat: keep connection alive through proxies/load balancers
   const heartbeat = setInterval(() => {
@@ -591,9 +648,9 @@ app.get("/events/:agentId", requireAuth, requireSelfOrAdmin("agentId"), (req, re
     removeSSE(agentId, res);
     if (getAgent(agentId)) {
       agentOfflineDelayed(agentId);
-      console.log(`⚡ SSE disconnected: ${agentId} (grace period 5s)`);
+      logger.info({ event: "sse_disconnected", agentId, gracePeriod: true });
     } else {
-      console.log(`⚡ SSE closed: ${agentId} (agent was removed)`);
+      logger.info({ event: "sse_closed", agentId, reason: "agent_removed" });
     }
   });
 });
@@ -601,19 +658,39 @@ app.get("/events/:agentId", requireAuth, requireSelfOrAdmin("agentId"), (req, re
 // ── Health — Public (no auth) ───────────────────────────────────
 
 app.get("/health", (_req, res) => {
-  res.json({
-    status: "ok",
+  const dbOk = checkDbHealth();
+  res.status(dbOk ? 200 : 503).json({
+    status: dbOk ? "ok" : "degraded",
+    checks: { store: "ok", database: dbOk ? "ok" : "error", sse: "ok" },
     authMode: getAuthMode(),
     agents: getActiveAgents().length,
     totalAgents: getAgents().length,
     uptime: process.uptime(),
+    version: "0.3.0",
+  });
+});
+
+// ── Metrics — Public ────────────────────────────────────────────
+
+app.get("/metrics", (_req, res) => {
+  const topo = getTopology();
+  const sseMetrics = getSSEMetrics();
+  const taskMetrics = getTaskMetrics();
+  res.json({
+    agents: { total: getAgents().length, online: getActiveAgents().length },
+    topology: { nodes: Object.keys(topo.nodes).length, edges: topo.edges.length },
+    tasks: taskMetrics,
+    sse: sseMetrics,
+    auth: { mode: getAuthMode() },
+    uptime: process.uptime(),
+    version: "0.3.0",
   });
 });
 
 // ── Error Handling ──────────────────────────────────────────────
 
 app.use((err: Error, _req: express.Request, res: Response, _next: NextFunction) => {
-  console.error("Unhandled error:", err.message, err.stack);
+  logger.error({ err, requestId: (_req as any).id }, "Unhandled error");
   res.status(500).json({ error: "Internal server error" });
 });
 
@@ -625,13 +702,9 @@ const adminKey = initAdminKey();
 startCleanupTimer();
 
 const server = app.listen(PORT, HOST, () => {
-  console.log(`Swarm Service running at http://${HOST}:${PORT}`);
-  console.log(`Auth mode: ${getAuthMode()}`);
+  logger.info({ event: "server_started", host: HOST, port: PORT, authMode: getAuthMode(), version: "0.3.0" });
   if (adminKey) {
-    console.log(`\n╔══════════════════════════════════════════════════════════════╗`);
-    console.log(`║  ADMIN API KEY (save this — shown only once):               ║`);
-    console.log(`║  ${adminKey}  ║`);
-    console.log(`╚══════════════════════════════════════════════════════════════╝\n`);
+    logger.info({ event: "admin_key_created", key: adminKey }, "ADMIN API KEY (save this — shown only once)");
   }
 });
 
@@ -640,24 +713,24 @@ let shuttingDown = false;
 async function gracefulShutdown(signal: string): Promise<void> {
   if (shuttingDown) return;
   shuttingDown = true;
-  console.log(`\n${signal} received — shutting down gracefully...`);
+  logger.info({ event: "shutdown_started", signal });
 
   server.close(() => {
-    console.log("HTTP server closed.");
+    logger.info({ event: "http_server_closed" });
   });
 
   closeAllSSE();
-  console.log("All SSE connections closed.");
+  logger.info({ event: "sse_connections_closed" });
 
   try {
     await saveTopologyNow();
-    console.log("Topology saved.");
+    logger.info({ event: "topology_saved" });
   } catch (err) {
-    console.error("Failed to save topology on shutdown:", err);
+    logger.error({ err }, "Failed to save topology on shutdown");
   }
 
   closeDb();
-  console.log("Database closed.");
+  logger.info({ event: "database_closed" });
 
   process.exit(0);
 }

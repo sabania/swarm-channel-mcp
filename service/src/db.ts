@@ -3,6 +3,7 @@ import path from "node:path";
 import os from "node:os";
 import crypto from "node:crypto";
 import type { Task, TaskMessage, TaskArtifact, TaskDetail, TaskStatus } from "./types.js";
+import { logger } from "./logger.js";
 
 // ── Database Setup ──────────────────────────────────────────────
 
@@ -280,7 +281,7 @@ export function startCleanupTimer(): void {
   if (cleanupTimer) return;
   cleanupTimer = setInterval(() => {
     const deleted = cleanupExpiredTasks();
-    if (deleted > 0) console.log(`🧹 Cleaned up ${deleted} expired tasks`);
+    if (deleted > 0) logger.info({ event: "tasks_cleanup", deleted });
   }, CLEANUP_INTERVAL_MS);
 }
 
@@ -288,6 +289,28 @@ export function stopCleanupTimer(): void {
   if (cleanupTimer) {
     clearInterval(cleanupTimer);
     cleanupTimer = null;
+  }
+}
+
+/** Task metrics for /metrics endpoint */
+export function getTaskMetrics(): { total: number; byStatus: Record<string, number> } {
+  const rows = db.prepare(`SELECT status, COUNT(*) as count FROM tasks GROUP BY status`).all() as { status: string; count: number }[];
+  const byStatus: Record<string, number> = {};
+  let total = 0;
+  for (const row of rows) {
+    byStatus[row.status] = row.count;
+    total += row.count;
+  }
+  return { total, byStatus };
+}
+
+/** Check database health */
+export function checkDbHealth(): boolean {
+  try {
+    db.prepare("SELECT 1").get();
+    return true;
+  } catch {
+    return false;
   }
 }
 

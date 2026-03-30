@@ -406,6 +406,17 @@ async function connectSSE(id: string): Promise<void> {
       ? `${SERVICE_URL}/events/${id}?token=${encodeURIComponent(agentApiKey)}`
       : `${SERVICE_URL}/events/${id}`;
     const res = await fetch(sseUrl, { signal });
+
+    // Stop retrying on auth errors — re-register needed
+    if (res.status === 401 || res.status === 403) {
+      console.error(`[swarm] SSE auth failed (${res.status}) — stopping reconnect`);
+      await pushChannel(
+        `SSE connection rejected: authentication failed (${res.status}). Your API key may be invalid or expired. Use 'register' to re-register and get a new key.`,
+        { event_type: "auth_failed" }
+      );
+      return;
+    }
+
     const reader = res.body?.getReader();
     if (!reader) return;
 
@@ -451,7 +462,15 @@ async function connectSSE(id: string): Promise<void> {
         try {
           const reconnHeaders: Record<string, string> = {};
           if (agentApiKey) reconnHeaders["Authorization"] = `Bearer ${agentApiKey}`;
-          await fetch(`${SERVICE_URL}/agents/${id}/connect`, { method: "POST", headers: reconnHeaders });
+          const reconnRes = await fetch(`${SERVICE_URL}/agents/${id}/connect`, { method: "POST", headers: reconnHeaders });
+          if (reconnRes.status === 401 || reconnRes.status === 403) {
+            console.error(`[swarm] Reconnect auth failed (${reconnRes.status}) — stopping`);
+            await pushChannel(
+              `Reconnect failed: authentication rejected (${reconnRes.status}). Use 'register' to re-register.`,
+              { event_type: "auth_failed" }
+            );
+            return;
+          }
           console.error(`[swarm] Reconnected ${id}`);
         } catch { /* service might still be down */ }
         connectSSE(id);

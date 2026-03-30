@@ -253,6 +253,96 @@ else
   log_fail "T4.4: Rapid-fire mutations" "Only $AGENT_COUNT agents after rapid creates"
 fi
 
+# ── T8: Input Validation ──────────────────────────────────────
+echo ""
+echo "--- T8: Input Validation ---"
+
+# T8.1 — Agent ID with invalid characters
+INVALID_RESULT=$(api POST /agents/create '{"id":"INVALID ID!","name":"Bad","description":"test","cwd":"C:/tmp"}')
+if echo "$INVALID_RESULT" | grep -q '"error"'; then
+  log_pass "T8.1: Invalid agent ID rejected"
+else
+  # Clean up if it was accidentally created
+  api DELETE "/agents/INVALID%20ID!" > /dev/null 2>&1
+  log_fail "T8.1: Invalid agent ID" "Should return 400, got: $(echo $INVALID_RESULT | head -c 200)"
+fi
+
+# T8.2 — Agent ID with special chars
+SPECIAL_RESULT=$(api POST /agents/create '{"id":"<script>alert(1)</script>","name":"XSS","description":"test","cwd":"C:/tmp"}')
+if echo "$SPECIAL_RESULT" | grep -q '"error"'; then
+  log_pass "T8.2: XSS in agent ID rejected"
+else
+  api DELETE "/agents/%3Cscript%3Ealert(1)%3C%2Fscript%3E" > /dev/null 2>&1
+  log_fail "T8.2: XSS agent ID" "Should be rejected"
+fi
+
+# T8.3 — Empty agent name
+EMPTY_RESULT=$(api POST /agents/create '{"id":"test-empty","name":"","description":"test","cwd":"C:/tmp"}')
+if echo "$EMPTY_RESULT" | grep -q '"error"'; then
+  log_pass "T8.3: Empty agent name rejected"
+else
+  api DELETE "/agents/test-empty" > /dev/null 2>&1
+  log_fail "T8.3: Empty agent name" "Should be rejected"
+fi
+
+# T8.4 — Very long agent ID (>100 chars)
+LONG_ID=$(node -e "console.log('a'.repeat(200))")
+LONG_RESULT=$(api POST /agents/create "{\"id\":\"$LONG_ID\",\"name\":\"Long\",\"description\":\"test\",\"cwd\":\"C:/tmp\"}")
+if echo "$LONG_RESULT" | grep -q '"error"'; then
+  log_pass "T8.4: Overlong agent ID rejected"
+else
+  api DELETE "/agents/$LONG_ID" > /dev/null 2>&1
+  log_fail "T8.4: Overlong agent ID" "Should be rejected (200 chars)"
+fi
+
+# ── T9: Message Size Limit ────────────────────────────────────
+echo ""
+echo "--- T9: Message Size Limit ---"
+
+# T9.1 — Normal message should work
+NORMAL_MSG=$(api POST /messages "{\"from\":\"$TEST_ID\",\"to\":\"$TEST_ID\",\"content\":\"short message\"}")
+# Self-message might fail due to no edge, check that it's not a size error
+if echo "$NORMAL_MSG" | grep -q '"error":".*size\|.*too large\|.*limit"'; then
+  log_fail "T9.1: Normal message" "Incorrectly rejected for size"
+else
+  log_pass "T9.1: Normal message — not size-limited"
+fi
+
+# T9.2 — Oversized message (>32KB) should be rejected
+BIG_CONTENT=$(node -e "console.log('x'.repeat(33000))")
+BIG_MSG=$(api POST /messages "{\"from\":\"qa\",\"to\":\"qa\",\"content\":\"$BIG_CONTENT\"}")
+if echo "$BIG_MSG" | grep -q '"error"'; then
+  log_pass "T9.2: Oversized message (33KB) rejected"
+else
+  log_fail "T9.2: Oversized message" "Should be rejected, got: $(echo $BIG_MSG | head -c 200)"
+fi
+
+# T9.3 — Message just under limit should work
+UNDER_CONTENT=$(node -e "console.log('x'.repeat(31000))")
+UNDER_MSG=$(api POST /messages "{\"from\":\"qa\",\"to\":\"lead-architect\",\"content\":\"$UNDER_CONTENT\"}")
+if echo "$UNDER_MSG" | grep -q '"error":".*size\|.*too large\|.*limit"'; then
+  log_fail "T9.3: Message under limit" "Incorrectly rejected for size"
+else
+  log_pass "T9.3: Message under 32KB — allowed"
+fi
+
+# ── T2.5: Topology ?full=true ─────────────────────────────────
+echo ""
+echo "--- T2.5: Topology full=true (Admin) ---"
+
+TOPO_FULL=$(api GET "/topology?full=true")
+if echo "$TOPO_FULL" | grep -q '"cwd"'; then
+  log_pass "T2.5: Topology ?full=true — cwd present (admin view)"
+else
+  log_fail "T2.5: Topology ?full=true" "cwd missing — admin view should include it"
+fi
+
+if echo "$TOPO_FULL" | grep -q '"launchCommand"'; then
+  log_pass "T2.6: Topology ?full=true — launchCommand present"
+else
+  log_fail "T2.6: Topology ?full=true" "launchCommand missing"
+fi
+
 # ── T7: Discover with Query Filtering ─────────────────────────
 echo ""
 echo "--- T7: Discover Query Filtering ---"

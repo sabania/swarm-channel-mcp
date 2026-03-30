@@ -1,8 +1,9 @@
 import express from "express";
-import fs from "node:fs";
+import fs from "node:fs/promises";
 import path from "node:path";
 import { exec } from "node:child_process";
 import os from "node:os";
+import type { Request, Response, NextFunction } from "express";
 import { DEFAULT_LAUNCH_CMD } from "./types.js";
 import {
   createAgent,
@@ -26,13 +27,19 @@ import {
   toPublicView,
   pushEvent,
   isOnline,
+  closeAllSSE,
+  saveTopologyNow,
+  validateAgentId,
+  validateAgentName,
+  validateDescription,
+  validateMessageContent,
 } from "./store.js";
 
 const PORT = parseInt(process.env.PORT || "3001", 10);
 const HOST = process.env.HOST || "127.0.0.1";
 
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: "1mb" }));
 app.use((_req, res, next) => {
   res.header("Access-Control-Allow-Origin", "*");
   res.header("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS");
@@ -49,9 +56,14 @@ app.use((_req, res, next) => {
 // Create agent from UI (offline)
 app.post("/agents/create", (req, res) => {
   const { id, name, description, cwd } = req.body;
-  if (!id || !name || !cwd) {
-    res.status(400).json({ error: "id, name, cwd required" });
-    return;
+  const idErr = validateAgentId(id);
+  if (idErr) { res.status(400).json({ error: idErr }); return; }
+  const nameErr = validateAgentName(name);
+  if (nameErr) { res.status(400).json({ error: nameErr }); return; }
+  if (!cwd || typeof cwd !== "string") { res.status(400).json({ error: "cwd is required" }); return; }
+  if (description) {
+    const descErr = validateDescription(description);
+    if (descErr) { res.status(400).json({ error: descErr }); return; }
   }
   const agent = createAgent({ id, name, description: description || `Agent ${name}`, cwd });
   if (!agent) {
@@ -65,10 +77,12 @@ app.post("/agents/create", (req, res) => {
 // Register from plugin (online)
 app.post("/agents", (req, res) => {
   const { id, name, description, cwd, autoconnect } = req.body;
-  if (!id || !name || !description) {
-    res.status(400).json({ error: "id, name, description required" });
-    return;
-  }
+  const idErr = validateAgentId(id);
+  if (idErr) { res.status(400).json({ error: idErr }); return; }
+  const nameErr = validateAgentName(name);
+  if (nameErr) { res.status(400).json({ error: nameErr }); return; }
+  const descErr = validateDescription(description);
+  if (descErr) { res.status(400).json({ error: descErr }); return; }
   const agent = registerAgent({ id, name, description, cwd, autoconnect });
   console.log(`+ Agent registered: ${id} (${name})`);
   res.json(agent);
@@ -155,8 +169,18 @@ app.get("/agents/:id/connections", (req, res) => {
 
 // ── Topology ────────────────────────────────────────────────────
 
-app.get("/topology", (_req, res) => {
-  res.json(getTopology());
+app.get("/topology", (req, res) => {
+  const topo = getTopology();
+  if (req.query.full === "true") {
+    res.json(topo); // Full data for admin UI (Phase 2: requires auth)
+    return;
+  }
+  // Public view (default) — no cwd, launchCommand, internal description
+  const publicNodes: Record<string, ReturnType<typeof toPublicView>> = {};
+  for (const [id, agent] of Object.entries(topo.nodes)) {
+    publicNodes[id] = toPublicView(agent as any);
+  }
+  res.json({ nodes: publicNodes, edges: topo.edges });
 });
 
 app.post("/edges", (req, res) => {
@@ -185,10 +209,12 @@ app.delete("/edges", (req, res) => {
 
 app.post("/messages", (req, res) => {
   const { from, to, content } = req.body;
-  if (!from || !to || !content) {
+  if (!from || !to) {
     res.status(400).json({ error: "from, to, content required" });
     return;
   }
+  const contentErr = validateMessageContent(content);
+  if (contentErr) { res.status(400).json({ error: contentErr }); return; }
   const target = getAgent(to);
   if (!target) {
     res.status(404).json({ error: `Agent "${to}" not found` });
@@ -205,10 +231,12 @@ app.post("/messages", (req, res) => {
 
 app.post("/messages/broadcast", (req, res) => {
   const { from, content } = req.body;
-  if (!from || !content) {
+  if (!from) {
     res.status(400).json({ error: "from, content required" });
     return;
   }
+  const contentErr = validateMessageContent(content);
+  if (contentErr) { res.status(400).json({ error: contentErr }); return; }
   const delivered = broadcastMessage(from, content);
   console.log(`📢 ${from} broadcast → ${delivered} delivered`);
   res.json({ delivered });
@@ -252,18 +280,13 @@ app.post("/agents/:id/launch", async (req, res) => {
     return;
   }
 
-  try {
-    // Create .swarm-agent.json so plugin auto-connects with this ID
-    const configPath = path.join(agent.cwd, ".swarm-agent.json");
-    fs.writeFileSync(configPath, JSON.stringify({ id: agent.id, autoconnect: true }, null, 2));
+  // Create .swarm-agent.json so plugin auto-connects with this ID
+  const configPath = path.join(agent.cwd, ".swarm-agent.json");
+  await fs.writeFile(configPath, JSON.stringify({ id: agent.id, autoconnect: true }, null, 2));
 
-    await launchTerminal(agent.cwd, agent.launchCommand || DEFAULT_LAUNCH_CMD);
-    console.log(`🚀 Launched agent: ${req.params.id} in ${agent.cwd}`);
-    res.json({ ok: true, cwd: agent.cwd });
-  } catch (err) {
-    console.error(`Failed to launch agent ${req.params.id}:`, err);
-    res.status(500).json({ error: "Failed to open terminal" });
-  }
+  await launchTerminal(agent.cwd, agent.launchCommand || DEFAULT_LAUNCH_CMD);
+  console.log(`🚀 Launched agent: ${req.params.id} in ${agent.cwd}`);
+  res.json({ ok: true, cwd: agent.cwd });
 });
 
 // ── SSE Event Stream ────────────────────────────────────────────
@@ -307,8 +330,47 @@ app.get("/health", (_req, res) => {
   });
 });
 
-// ── Start ───────────────────────────────────────────────────────
+// ── Error Handling ──────────────────────────────────────────────
 
-app.listen(PORT, HOST, () => {
+// Catch-all error handler (must be registered last)
+app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
+  console.error("Unhandled error:", err.message, err.stack);
+  res.status(500).json({ error: "Internal server error" });
+});
+
+// ── Start & Graceful Shutdown ───────────────────────────────────
+
+const server = app.listen(PORT, HOST, () => {
   console.log(`Swarm Service running at http://${HOST}:${PORT}`);
 });
+
+let shuttingDown = false;
+
+async function gracefulShutdown(signal: string): Promise<void> {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`\n${signal} received — shutting down gracefully...`);
+
+  // 1. Stop accepting new connections
+  server.close(() => {
+    console.log("HTTP server closed.");
+  });
+
+  // 2. Close all SSE connections
+  closeAllSSE();
+  console.log("All SSE connections closed.");
+
+  // 3. Save topology to disk
+  try {
+    await saveTopologyNow();
+    console.log("Topology saved.");
+  } catch (err) {
+    console.error("Failed to save topology on shutdown:", err);
+  }
+
+  // 4. Exit
+  process.exit(0);
+}
+
+process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
+process.on("SIGINT", () => gracefulShutdown("SIGINT"));

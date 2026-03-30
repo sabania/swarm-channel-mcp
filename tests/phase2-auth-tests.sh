@@ -315,13 +315,13 @@ else
   log_fail "TD.4: Agent removes edge" "Expected 403, got $CODE"
 fi
 
-# TD.5 — Agent updates own properties
+# TD.5 — PATCH /agents/:id is admin-only (agents cannot self-update properties)
 RESP=$(api_with_auth "$AGENT1_KEY" PATCH "/agents/$AGENT1_ID" '{"name":"QA Updated Name"}')
 CODE=$(get_code "$RESP")
-if [ "$CODE" = "200" ]; then
-  log_pass "TD.5: Agent updates own properties → 200"
+if [ "$CODE" = "403" ]; then
+  log_pass "TD.5: Agent self-update properties → 403 (admin-only)"
 else
-  log_fail "TD.5: Self-update" "Expected 200, got $CODE"
+  log_fail "TD.5: Self-update" "Expected 403, got $CODE"
 fi
 
 # TD.6 — Agent updates other's properties
@@ -333,13 +333,17 @@ else
   log_fail "TD.6: Update other agent" "Expected 403, got $CODE"
 fi
 
-# TD.7 — Agent accesses topology?full=true
+# TD.7 — Agent gets ?full=true but receives Public View (no internal fields)
 RESP=$(api_with_auth "$AGENT1_KEY" GET "/topology?full=true")
 CODE=$(get_code "$RESP")
-if [ "$CODE" = "403" ]; then
-  log_pass "TD.7: Agent topology?full=true → 403"
+BODY=$(get_body "$RESP")
+HAS_CWD=$(echo "$BODY" | grep -c '"cwd"' || true)
+if [ "$CODE" = "200" ] && [ "$HAS_CWD" = "0" ]; then
+  log_pass "TD.7: Agent topology?full=true → 200 (public view, no cwd)"
+elif [ "$CODE" = "200" ]; then
+  log_fail "TD.7: Agent topology?full=true" "200 but internal fields exposed (cwd found)"
 else
-  log_fail "TD.7: Admin topology" "Expected 403, got $CODE"
+  log_fail "TD.7: Agent topology?full=true" "Expected 200, got $CODE"
 fi
 
 # Admin tests (require SWARM_ADMIN_KEY)

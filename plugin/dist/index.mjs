@@ -20815,6 +20815,7 @@ var StdioServerTransport = class {
 var SERVICE_URL = process.env.SWARM_URL || "http://127.0.0.1:3001";
 var AGENT_CONFIG = path.join(process.cwd(), ".swarm-agent.json");
 var agentId = null;
+var agentApiKey = null;
 var sseAbort = null;
 var sseRetryDelay = 1e3;
 function saveLocalConfig(config2) {
@@ -20938,9 +20939,12 @@ var TOOLS = [
 ];
 server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }));
 async function api(method, path2, body) {
+  const headers = {};
+  if (body) headers["Content-Type"] = "application/json";
+  if (agentApiKey) headers["Authorization"] = `Bearer ${agentApiKey}`;
   const res = await fetch(`${SERVICE_URL}${path2}`, {
     method,
-    headers: body ? { "Content-Type": "application/json" } : {},
+    headers,
     body: body ? JSON.stringify(body) : void 0
   });
   if (!res.ok) {
@@ -20958,12 +20962,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     switch (name) {
       case "register": {
         const { id, name: agentName, description } = args;
-        await api("POST", "/agents", { id, name: agentName, description, cwd: process.cwd() });
+        const regResult = await api("POST", "/agents", { id, name: agentName, description, cwd: process.cwd() });
         agentId = id;
-        saveLocalConfig({ id, autoconnect: true });
+        agentApiKey = regResult.apiKey || null;
+        saveLocalConfig({ id, autoconnect: true, apiKey: agentApiKey || void 0 });
         connectSSE(id);
         return text(
-          `Registered as "${agentName}" (${id}). Listening for messages. Auto-reconnect enabled.`
+          `Registered as "${agentName}" (${id}). Listening for messages. Auto-reconnect enabled.${agentApiKey ? " API key received." : ""}`
         );
       }
       case "whoami": {
@@ -21157,7 +21162,8 @@ async function connectSSE(id) {
   sseAbort = new AbortController();
   const { signal } = sseAbort;
   try {
-    const res = await fetch(`${SERVICE_URL}/events/${id}`, { signal });
+    const sseUrl = agentApiKey ? `${SERVICE_URL}/events/${id}?token=${encodeURIComponent(agentApiKey)}` : `${SERVICE_URL}/events/${id}`;
+    const res = await fetch(sseUrl, { signal });
     const reader = res.body?.getReader();
     if (!reader) return;
     sseRetryDelay = 1e3;
@@ -21190,7 +21196,9 @@ async function connectSSE(id) {
       setTimeout(async () => {
         if (agentId !== id) return;
         try {
-          await fetch(`${SERVICE_URL}/agents/${id}/connect`, { method: "POST" });
+          const reconnHeaders = {};
+          if (agentApiKey) reconnHeaders["Authorization"] = `Bearer ${agentApiKey}`;
+          await fetch(`${SERVICE_URL}/agents/${id}/connect`, { method: "POST", headers: reconnHeaders });
           console.error(`[swarm] Reconnected ${id}`);
         } catch {
         }
@@ -21209,8 +21217,11 @@ async function autoRegister() {
   const config2 = loadLocalConfig();
   if (!config2) return;
   if (!config2.autoconnect) return;
+  agentApiKey = config2.apiKey || null;
   try {
-    const connectRes = await fetch(`${SERVICE_URL}/agents/${config2.id}/connect`, { method: "POST" });
+    const connectHeaders = {};
+    if (agentApiKey) connectHeaders["Authorization"] = `Bearer ${agentApiKey}`;
+    const connectRes = await fetch(`${SERVICE_URL}/agents/${config2.id}/connect`, { method: "POST", headers: connectHeaders });
     if (connectRes.ok) {
       const data = await connectRes.json();
       agentId = config2.id;

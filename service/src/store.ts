@@ -35,6 +35,7 @@ const saved = loadTopology();
 const agents = new Map<string, AgentInfo>(Object.entries(saved.nodes));
 const edges: [string, string][] = saved.edges;
 const sseConnections = new Map<string, Response[]>();
+const offlineTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
 for (const agent of agents.values()) {
   agent.status = "offline";
@@ -225,7 +226,32 @@ export function registerAgent(info: {
   return agent;
 }
 
-export function agentOffline(agentId: string): boolean {
+const OFFLINE_GRACE_MS = 5000;
+
+export function agentOfflineDelayed(agentId: string): void {
+  // Cancel existing timer if any
+  cancelOfflineTimer(agentId);
+
+  const timer = setTimeout(() => {
+    offlineTimers.delete(agentId);
+    // Only go offline if still no SSE connection
+    if (!isOnline(agentId)) {
+      agentOfflineNow(agentId);
+    }
+  }, OFFLINE_GRACE_MS);
+
+  offlineTimers.set(agentId, timer);
+}
+
+export function cancelOfflineTimer(agentId: string): void {
+  const timer = offlineTimers.get(agentId);
+  if (timer) {
+    clearTimeout(timer);
+    offlineTimers.delete(agentId);
+  }
+}
+
+function agentOfflineNow(agentId: string): boolean {
   const agent = agents.get(agentId);
   if (!agent) return false;
   agent.status = "offline";

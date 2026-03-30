@@ -20957,7 +20957,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     switch (name) {
       case "register": {
         const { id, name: agentName, description } = args;
-        await api("POST", "/agents", { id, name: agentName, description });
+        await api("POST", "/agents", { id, name: agentName, description, cwd: process.cwd() });
         agentId = id;
         saveLocalConfig({ id, autoconnect: true });
         connectSSE(id);

@@ -7,7 +7,8 @@ import { DEFAULT_LAUNCH_CMD } from "./types.js";
 import {
   createAgent,
   registerAgent,
-  agentOffline,
+  agentOfflineDelayed,
+  cancelOfflineTimer,
   removeAgent,
   updateAgent,
   setAgentStatus,
@@ -278,15 +279,17 @@ app.get("/events/:agentId", (req, res) => {
 
   res.write(`event: connected\ndata: ${JSON.stringify({ agentId })}\n\n`);
 
+  // Cancel pending offline timer (reconnect within grace period)
+  cancelOfflineTimer(agentId);
+
   addSSE(agentId, res);
   console.log(`⚡ SSE connected: ${agentId}`);
 
   req.on("close", () => {
     removeSSE(agentId, res);
-    // Only set offline if agent still exists (not removed)
     if (getAgent(agentId)) {
-      agentOffline(agentId);
-      console.log(`⚡ SSE disconnected: ${agentId} (now offline)`);
+      agentOfflineDelayed(agentId);
+      console.log(`⚡ SSE disconnected: ${agentId} (grace period 5s)`);
     } else {
       console.log(`⚡ SSE closed: ${agentId} (agent was removed)`);
     }

@@ -179,7 +179,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           name: string;
           description: string;
         };
-        await api("POST", "/agents", { id, name: agentName, description });
+        await api("POST", "/agents", { id, name: agentName, description, cwd: process.cwd() });
         agentId = id;
         saveLocalConfig({ id, autoconnect: true });
         connectSSE(id);

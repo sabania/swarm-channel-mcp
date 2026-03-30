@@ -150,7 +150,8 @@ app.patch("/agents/:id/status", (req, res) => {
 
 app.get("/agents", (req, res) => {
   const all = req.query.all === "true";
-  res.json(all ? getAgents() : getActiveAgents());
+  const agents = all ? getAgents() : getActiveAgents();
+  res.json(agents.map(toPublicView));
 });
 
 app.get("/agents/:id", (req, res) => {

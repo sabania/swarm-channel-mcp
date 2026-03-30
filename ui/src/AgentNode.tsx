@@ -46,8 +46,8 @@ export function AgentNode({ data }: NodeProps) {
         <strong style={{ fontSize: 14 }}>{agent.name}</strong>
       </div>
       <div style={{ fontSize: 11, color: "#a6adc8", lineHeight: 1.3 }}>
-        {(agent.publicDescription || agent.description || "").slice(0, 80)}
-        {(agent.publicDescription || agent.description || "").length > 80 ? "…" : ""}
+        {(agent.description || "").slice(0, 80)}
+        {(agent.description || "").length > 80 ? "…" : ""}
       </div>
       <div style={{ fontSize: 10, color: "#585b70", marginTop: 4 }}>
         {agent.id}

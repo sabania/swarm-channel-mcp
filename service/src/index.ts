@@ -31,6 +31,8 @@ import {
   addSSE,
   removeSSE,
   toPublicView,
+  toPublicViewWithCapabilities,
+  replayEvents,
   pushEvent,
   isOnline,
   closeAllSSE,
@@ -140,8 +142,8 @@ app.post("/agents/:id/connect", requireAuth, requireSelfOrAdmin("id"), (req, res
   }
   setAgentStatus(param(req, "id"), "available");
 
-  // Broadcast to connected peers
-  const publicView = toPublicView(agent);
+  // Broadcast to connected peers (with capabilities)
+  const publicView = toPublicViewWithCapabilities(agent);
   for (const peer of getConnectedAgents(param(req, "id"))) {
     if (isOnline(peer.id)) {
       pushEvent(peer.id, "agent_online", publicView);
@@ -557,12 +559,35 @@ app.get("/events/:agentId", requireAuth, requireSelfOrAdmin("agentId"), (req, re
 
   res.write(`event: connected\ndata: ${JSON.stringify({ agentId })}\n\n`);
 
+  // Reconnect recovery: replay missed events
+  const lastEventId = req.headers["last-event-id"];
+  if (lastEventId) {
+    const afterId = parseInt(lastEventId as string, 10);
+    if (!isNaN(afterId)) {
+      const missed = replayEvents(agentId, afterId);
+      for (const evt of missed) {
+        res.write(`id: ${evt.id}\nevent: ${evt.event}\ndata: ${JSON.stringify(evt.data)}\n\n`);
+      }
+      if (missed.length > 0) {
+        console.log(`⚡ SSE replayed ${missed.length} events for ${agentId} (after id ${afterId})`);
+      }
+    }
+  }
+
   cancelOfflineTimer(agentId);
 
   addSSE(agentId, res);
   console.log(`⚡ SSE connected: ${agentId}`);
 
+  // Heartbeat: keep connection alive through proxies/load balancers
+  const heartbeat = setInterval(() => {
+    if (!res.destroyed) {
+      res.write(": heartbeat\n\n");
+    }
+  }, 30000);
+
   req.on("close", () => {
+    clearInterval(heartbeat);
     removeSSE(agentId, res);
     if (getAgent(agentId)) {
       agentOfflineDelayed(agentId);

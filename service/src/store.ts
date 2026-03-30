@@ -149,7 +149,44 @@ export function toPublicView(agent: AgentInfo): AgentPublicView {
   };
 }
 
-// ── SSE ─────────────────────────────────────────────────────────
+export function toPublicViewWithCapabilities(agent: AgentInfo): AgentPublicView & { capabilities?: AgentCapabilities } {
+  return {
+    ...toPublicView(agent),
+    capabilities: agent.capabilities,
+  };
+}
+
+// ── SSE + Event Buffer ──────────────────────────────────────────
+
+const EVENT_BUFFER_MAX = 1000;
+
+interface BufferedEvent {
+  id: number;
+  event: string;
+  data: unknown;
+  timestamp: string;
+}
+
+const eventCounters = new Map<string, number>();
+const eventBuffers = new Map<string, BufferedEvent[]>();
+
+export function getNextEventId(agentId: string): number {
+  const current = eventCounters.get(agentId) ?? 0;
+  const next = current + 1;
+  eventCounters.set(agentId, next);
+  return next;
+}
+
+export function replayEvents(agentId: string, afterId: number): BufferedEvent[] {
+  const buffer = eventBuffers.get(agentId);
+  if (!buffer) return [];
+  return buffer.filter((e) => e.id > afterId);
+}
+
+export function clearEventBuffer(agentId: string): void {
+  eventBuffers.delete(agentId);
+  eventCounters.delete(agentId);
+}
 
 export function addSSE(agentId: string, res: Response): void {
   if (!sseConnections.has(agentId)) sseConnections.set(agentId, []);
@@ -165,9 +202,18 @@ export function removeSSE(agentId: string, res: Response): void {
 }
 
 export function pushEvent(agentId: string, event: string, data: unknown): void {
+  const id = getNextEventId(agentId);
+
+  // Store in ring buffer
+  if (!eventBuffers.has(agentId)) eventBuffers.set(agentId, []);
+  const buffer = eventBuffers.get(agentId)!;
+  buffer.push({ id, event, data, timestamp: new Date().toISOString() });
+  if (buffer.length > EVENT_BUFFER_MAX) buffer.shift();
+
+  // Send to SSE connections with id field
   const conns = sseConnections.get(agentId);
   if (!conns) return;
-  const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+  const payload = `id: ${id}\nevent: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
   for (const res of conns) {
     res.write(payload);
   }
@@ -229,10 +275,10 @@ export function addEdge(a: string, b: string): boolean {
   const agentB = agents.get(b)!;
 
   if (isOnline(a)) {
-    pushEvent(a, "connected_to", toPublicView(agentB));
+    pushEvent(a, "connected_to", toPublicViewWithCapabilities(agentB));
   }
   if (isOnline(b)) {
-    pushEvent(b, "connected_to", toPublicView(agentA));
+    pushEvent(b, "connected_to", toPublicViewWithCapabilities(agentA));
   }
 
   return true;
@@ -327,8 +373,8 @@ export function registerAgent(info: {
   agents.set(info.id, agent);
   saveTopology();
 
-  // Notify connected peers (public view only)
-  const publicView = toPublicView(agent);
+  // Notify connected peers (with capabilities for discovery)
+  const publicView = toPublicViewWithCapabilities(agent);
   for (const peerId of getConnectedIds(info.id)) {
     if (isOnline(peerId)) {
       pushEvent(peerId, "agent_online", publicView);

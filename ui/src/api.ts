@@ -211,3 +211,32 @@ export async function updateTask(taskId: string, status: TaskStatus): Promise<Ta
   return res.json();
 }
 
+export async function fetchAllTasks(filters?: {
+  status?: TaskStatus;
+  from?: string;
+  to?: string;
+}): Promise<Task[]> {
+  const params = new URLSearchParams();
+  if (filters?.status) params.set("status", filters.status);
+  if (filters?.from) params.set("from", filters.from);
+  if (filters?.to) params.set("to", filters.to);
+  const qs = params.toString();
+  const res = await apiFetch(`${BASE}/tasks${qs ? `?${qs}` : ""}`);
+  return res.json();
+}
+
+// ── Metrics ────────────────────────────────────────────────────
+
+export interface Metrics {
+  agents: { total: number; online: number };
+  topology: { nodes: number; edges: number };
+  tasks: { total: number; byStatus: Record<string, number> };
+  uptime: number;
+  version: string;
+}
+
+export async function fetchMetrics(): Promise<Metrics> {
+  const res = await apiFetch(`${BASE}/metrics`);
+  return res.json();
+}
+

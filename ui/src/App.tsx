@@ -1,205 +1,38 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import {
-  ReactFlow,
-  Background,
-  Controls,
-  type Node,
-  type Edge,
-  type Connection,
-  addEdge as rfAddEdge,
-  useNodesState,
-  useEdgesState,
-} from "@xyflow/react";
-import "@xyflow/react/dist/style.css";
+import { Outlet, Navigate, Route, Routes } from "react-router-dom";
+import { Sidebar } from "./components/Sidebar";
+import { RequireAdmin } from "./components/RequireAdmin";
+import { DashboardPage } from "./pages/DashboardPage";
+import { AdminPage } from "./pages/AdminPage";
+import { TasksPage } from "./pages/TasksPage";
+import { TaskDetailPage } from "./pages/TaskDetailPage";
+import { ConnectionsPage } from "./pages/ConnectionsPage";
+import { colors } from "./theme";
 
-import { AgentNode } from "./AgentNode";
-import { AgentPanel } from "./AgentPanel";
-import { CreateAgentDialog } from "./CreateAgentDialog";
-import { AuthDialog } from "./AuthDialog";
-import { fetchTopology, addEdge, removeEdge, setAdminToken, setOnAuthRequired, type AgentInfo } from "./api";
-
-const nodeTypes = { agent: AgentNode };
-
-function topologyToFlow(
-  agents: Record<string, AgentInfo>,
-  topoEdges: [string, string][],
-  selectedId: string | null,
-  onSelect: (id: string) => void
-) {
-  const ids = Object.keys(agents);
-  const cols = Math.ceil(Math.sqrt(ids.length));
-
-  const nodes: Node[] = ids.map((id, i) => ({
-    id,
-    type: "agent",
-    position: {
-      x: (i % cols) * 250 + 50,
-      y: Math.floor(i / cols) * 180 + 50,
-    },
-    data: { agent: agents[id], selected: id === selectedId, onSelect },
-  }));
-
-  const edges: Edge[] = topoEdges.map(([a, b]) => ({
-    id: `${a}-${b}`,
-    source: a,
-    target: b,
-    style: { stroke: "#585b70", strokeWidth: 2 },
-    animated: agents[a]?.status !== "offline" && agents[b]?.status !== "offline",
-  }));
-
-  return { nodes, edges };
+function Layout() {
+  return (
+    <div style={{ display: "flex", width: "100vw", height: "100vh", background: colors.crust }}>
+      <Sidebar />
+      <main style={{ flex: 1, overflow: "auto", position: "relative" }}>
+        <Outlet />
+      </main>
+    </div>
+  );
 }
 
 export default function App() {
-  const [nodes, setNodes, onNodesChange] = useNodesState([]);
-  const [edges, setEdges, onEdgesChange] = useEdgesState([]);
-  const [allAgents, setAllAgents] = useState<Record<string, AgentInfo>>({});
-  const [selectedAgent, setSelectedAgent] = useState<string | null>(null);
-  const [showCreateDialog, setShowCreateDialog] = useState(false);
-  const [showAuthDialog, setShowAuthDialog] = useState(false);
-  const authResolveRef = useRef<(() => void) | null>(null);
-
-  useEffect(() => {
-    setOnAuthRequired(() => new Promise<void>((resolve) => {
-      authResolveRef.current = resolve;
-      setShowAuthDialog(true);
-    }));
-    return () => setOnAuthRequired(null);
-  }, []);
-
-  const loadTopology = useCallback(async () => {
-    const topo = await fetchTopology();
-    setAllAgents(topo.nodes);
-    const flow = topologyToFlow(topo.nodes, topo.edges, selectedAgent, setSelectedAgent);
-    setNodes((prev) => {
-      const posMap = new Map(prev.map((n) => [n.id, n.position]));
-      return flow.nodes.map((n) => ({
-        ...n,
-        position: posMap.get(n.id) || n.position,
-      }));
-    });
-    setEdges(flow.edges);
-  }, [setNodes, setEdges, selectedAgent]);
-
-  useEffect(() => {
-    loadTopology();
-    const interval = setInterval(loadTopology, 3000);
-    return () => clearInterval(interval);
-  }, [loadTopology]);
-
-  const onConnect = useCallback(
-    async (connection: Connection) => {
-      if (connection.source && connection.target) {
-        await addEdge(connection.source, connection.target);
-        setEdges((eds) =>
-          rfAddEdge(
-            { ...connection, style: { stroke: "#585b70", strokeWidth: 2 }, animated: true },
-            eds
-          )
-        );
-      }
-    },
-    [setEdges]
-  );
-
-  const onEdgeDoubleClick = useCallback(
-    async (_: React.MouseEvent, edge: Edge) => {
-      await removeEdge(edge.source, edge.target);
-      setEdges((eds) => eds.filter((e) => e.id !== edge.id));
-    },
-    [setEdges]
-  );
-
-  const selected = selectedAgent ? allAgents[selectedAgent] : null;
-
   return (
-    <div style={{ width: "100vw", height: "100vh", background: "#11111b" }}>
-      <div
-        style={{
-          position: "absolute",
-          top: 12,
-          left: 12,
-          zIndex: 10,
-          color: "#cdd6f4",
-          fontFamily: "system-ui, sans-serif",
-          fontSize: 13,
-          background: "#181825",
-          padding: "8px 14px",
-          borderRadius: 8,
-          border: "1px solid #313244",
-        }}
-      >
-        <strong>Swarm Topology</strong>
-        <span style={{ color: "#585b70", marginLeft: 12 }}>
-          {Object.values(allAgents).filter((a) => a.status !== "offline").length} online
-          {" / "}
-          {Object.keys(allAgents).length} total
-        </span>
-        <span style={{ color: "#585b70", marginLeft: 12, fontSize: 11 }}>
-          Drag between nodes to connect — Double-click edge to disconnect
-        </span>
-        <button
-          onClick={() => setShowCreateDialog(true)}
-          style={{
-            marginLeft: 12,
-            padding: "4px 12px",
-            background: "#a6e3a1",
-            color: "#1e1e2e",
-            border: "none",
-            borderRadius: 6,
-            cursor: "pointer",
-            fontSize: 12,
-            fontWeight: "bold",
-          }}
-        >
-          + Add Agent
-        </button>
-      </div>
-      <ReactFlow
-        nodes={nodes}
-        edges={edges}
-        onNodesChange={onNodesChange}
-        onEdgesChange={onEdgesChange}
-        onConnect={onConnect}
-        onEdgeDoubleClick={onEdgeDoubleClick}
-        nodeTypes={nodeTypes}
-        fitView
-        style={{ background: "#11111b" }}
-      >
-        <Background color="#313244" gap={20} />
-        <Controls
-          style={{ background: "#181825", border: "1px solid #313244", borderRadius: 8 }}
-        />
-      </ReactFlow>
-      {selected && (
-        <AgentPanel
-          key={selectedAgent}
-          agent={selected}
-          onClose={() => setSelectedAgent(null)}
-          onUpdate={loadTopology}
-          onSelectAgent={setSelectedAgent}
-        />
-      )}
-      {showCreateDialog && (
-        <CreateAgentDialog
-          existingIds={Object.keys(allAgents)}
-          onClose={() => setShowCreateDialog(false)}
-          onCreated={loadTopology}
-        />
-      )}
-      {showAuthDialog && (
-        <AuthDialog
-          onSubmit={(token) => {
-            setAdminToken(token);
-            setShowAuthDialog(false);
-            authResolveRef.current?.();
-          }}
-          onCancel={() => {
-            setShowAuthDialog(false);
-            authResolveRef.current?.();
-          }}
-        />
-      )}
-    </div>
+    <Routes>
+      <Route element={<Layout />}>
+        <Route index element={<Navigate to="/dashboard" replace />} />
+        <Route path="dashboard" element={<DashboardPage />} />
+        <Route path="admin" element={
+          <RequireAdmin><AdminPage /></RequireAdmin>
+        } />
+        <Route path="tasks" element={<TasksPage />} />
+        <Route path="tasks/:taskId" element={<TaskDetailPage />} />
+        <Route path="connections" element={<ConnectionsPage />} />
+        <Route path="*" element={<Navigate to="/dashboard" replace />} />
+      </Route>
+    </Routes>
   );
 }

@@ -12,6 +12,7 @@ const AGENT_CONFIG = path.join(process.cwd(), ".swarm-agent.json");
 
 let agentId: string | null = null;
 let sseAbort: AbortController | null = null;
+let sseRetryDelay = 1000; // Exponential backoff: 1s → 30s cap
 
 // ── Local Config (minimal - just ID + autoconnect) ──────────────
 
@@ -226,8 +227,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "discover": {
         if (!agentId) return text("You must register first.");
         const { query } = args as { query: string };
-        const agents = await api("GET", `/agents/${agentId}/connections`);
-        return text(`Searching for: "${query}"\n\n${JSON.stringify(agents, null, 2)}`);
+        const allAgents = await api("GET", `/agents/${agentId}/connections`) as Array<{ id: string; name: string; description: string; status: string }>;
+        if (!query) return text(JSON.stringify(allAgents, null, 2));
+        const keywords = query.toLowerCase().split(/\s+/);
+        const matched = allAgents.filter((a) => {
+          const haystack = `${a.name} ${a.description}`.toLowerCase();
+          return keywords.some((kw) => haystack.includes(kw));
+        });
+        if (matched.length === 0) {
+          return text(`No agents found matching "${query}". Connected agents:\n${JSON.stringify(allAgents, null, 2)}`);
+        }
+        return text(`Found ${matched.length} agent(s) matching "${query}":\n${JSON.stringify(matched, null, 2)}`);
       }
 
       case "send_message": {
@@ -288,6 +298,97 @@ async function pushChannel(content: string, meta: Record<string, string>): Promi
 
 // ── SSE Connection to Service ───────────────────────────────────
 
+function parseSSEBlock(block: string): { event: string; data: string } | null {
+  let event = "";
+  const dataLines: string[] = [];
+
+  for (const line of block.split("\n")) {
+    if (line.startsWith("event:")) {
+      event = line.slice(6).trim();
+    } else if (line.startsWith("data:")) {
+      dataLines.push(line.slice(5).trimStart());
+    }
+    // Ignore id:, retry:, comments (:), and unknown fields
+  }
+
+  if (!event || dataLines.length === 0) return null;
+  return { event, data: dataLines.join("\n") };
+}
+
+function backoffDelay(): number {
+  const jitter = 1 + (Math.random() * 0.4 - 0.2); // ±20%
+  return Math.round(sseRetryDelay * jitter);
+}
+
+async function handleSSEEvent(event: string, data: unknown): Promise<void> {
+  const d = data as Record<string, string>;
+
+  switch (event) {
+    case "message":
+      await pushChannel(
+        `Message from ${d.from}: ${d.content}`,
+        { from: sanitizeKey(d.from), msg_id: sanitizeKey(d.id) }
+      );
+      break;
+    case "agent_online":
+      await pushChannel(
+        `Agent online: ${d.name} (${d.id}) — ${d.description}`,
+        { event_type: "agent_online", agent_id: sanitizeKey(d.id) }
+      );
+      break;
+    case "agent_offline":
+      await pushChannel(
+        `Agent offline: ${d.name} (${d.id})`,
+        { event_type: "agent_offline", agent_id: sanitizeKey(d.id) }
+      );
+      break;
+    case "connected_to":
+      await pushChannel(
+        `New connection: ${d.name} (${d.id}, ${d.status}) — ${d.description}`,
+        { event_type: "connected_to", agent_id: sanitizeKey(d.id) }
+      );
+      break;
+    case "disconnected_from":
+      await pushChannel(
+        `Connection removed: ${d.id}`,
+        { event_type: "disconnected_from", agent_id: sanitizeKey(d.id) }
+      );
+      break;
+    case "agent_renamed":
+      await pushChannel(
+        `Agent renamed: "${d.oldId}" is now "${d.newId}" (${d.name}). Use the new ID for future messages.`,
+        { event_type: "agent_renamed", old_id: sanitizeKey(d.oldId), new_id: sanitizeKey(d.newId) }
+      );
+      break;
+    case "agent_removed":
+      if (d.id === agentId) {
+        agentId = null;
+        try { fs.unlinkSync(AGENT_CONFIG); } catch { /* may not exist */ }
+        await pushChannel(
+          `You were removed from the swarm by an admin. Your local config has been deleted. Use 'register' to rejoin.`,
+          { event_type: "agent_removed" }
+        );
+      } else {
+        await pushChannel(
+          `Agent "${d.name}" (${d.id}) was removed from the swarm.`,
+          { event_type: "agent_removed", agent_id: sanitizeKey(d.id) }
+        );
+      }
+      break;
+    case "properties_updated":
+      if (d.id && d.id !== agentId) {
+        agentId = d.id;
+        saveLocalConfig({ id: d.id, autoconnect: true });
+      }
+      await pushChannel(
+        `Your properties were updated by the swarm admin. No action required. New values — ID: "${d.id || agentId}", Name: "${d.name}", Description: "${d.description}".${d.publicDescription ? ` Public description: "${d.publicDescription}".` : ""}`,
+        { event_type: "properties_updated" }
+      );
+      break;
+    // connected, heartbeat, and unknown events are silently ignored
+  }
+}
+
 async function connectSSE(id: string): Promise<void> {
   disconnectSSE();
 
@@ -298,6 +399,9 @@ async function connectSSE(id: string): Promise<void> {
     const res = await fetch(`${SERVICE_URL}/events/${id}`, { signal });
     const reader = res.body?.getReader();
     if (!reader) return;
+
+    // Connection succeeded — reset backoff
+    sseRetryDelay = 1000;
 
     const decoder = new TextDecoder();
     let buffer = "";
@@ -311,74 +415,28 @@ async function connectSSE(id: string): Promise<void> {
       buffer = parts.pop() || "";
 
       for (const part of parts) {
-        const eventMatch = part.match(/^event:\s*(.+)$/m);
-        const dataMatch = part.match(/^data:\s*(.+)$/m);
-        if (!eventMatch || !dataMatch) continue;
+        const parsed = parseSSEBlock(part);
+        if (!parsed) continue;
 
-        const event = eventMatch[1];
-        const data = JSON.parse(dataMatch[1]);
-
-        if (event === "message") {
-          await pushChannel(
-            `Message from ${data.from}: ${data.content}`,
-            { from: sanitizeKey(data.from), msg_id: sanitizeKey(data.id) }
-          );
-        } else if (event === "agent_online") {
-          await pushChannel(
-            `Agent online: ${data.name} (${data.id}) — ${data.description}`,
-            { event_type: "agent_online", agent_id: sanitizeKey(data.id) }
-          );
-        } else if (event === "agent_offline") {
-          await pushChannel(
-            `Agent offline: ${data.name} (${data.id})`,
-            { event_type: "agent_offline", agent_id: sanitizeKey(data.id) }
-          );
-        } else if (event === "connected_to") {
-          await pushChannel(
-            `New connection: ${data.name} (${data.id}, ${data.status}) — ${data.description}`,
-            { event_type: "connected_to", agent_id: sanitizeKey(data.id) }
-          );
-        } else if (event === "disconnected_from") {
-          await pushChannel(
-            `Connection removed: ${data.id}`,
-            { event_type: "disconnected_from", agent_id: sanitizeKey(data.id) }
-          );
-        } else if (event === "agent_renamed") {
-          await pushChannel(
-            `Agent renamed: "${data.oldId}" is now "${data.newId}" (${data.name}). Use the new ID for future messages.`,
-            { event_type: "agent_renamed", old_id: sanitizeKey(data.oldId), new_id: sanitizeKey(data.newId) }
-          );
-        } else if (event === "agent_removed" && data.id === agentId) {
-          // We were removed from the swarm
-          agentId = null;
-          try { fs.unlinkSync(AGENT_CONFIG); } catch { /* may not exist */ }
-          await pushChannel(
-            `You were removed from the swarm by an admin. Your local config has been deleted. Use 'register' to rejoin.`,
-            { event_type: "agent_removed" }
-          );
-        } else if (event === "agent_removed" && data.id !== agentId) {
-          // A peer was removed
-          await pushChannel(
-            `Agent "${data.name}" (${data.id}) was removed from the swarm.`,
-            { event_type: "agent_removed", agent_id: sanitizeKey(data.id) }
-          );
-        } else if (event === "properties_updated") {
-          // Update local ID if changed
-          if (data.id && data.id !== agentId) {
-            agentId = data.id;
-            saveLocalConfig({ id: data.id, autoconnect: true });
-          }
-          await pushChannel(
-            `Your properties were updated by the swarm admin. No action required. New values — ID: "${data.id || agentId}", Name: "${data.name}", Description: "${data.description}".${data.publicDescription ? ` Public description: "${data.publicDescription}".` : ""}`,
-            { event_type: "properties_updated" }
-          );
+        let data: unknown;
+        try {
+          data = JSON.parse(parsed.data);
+        } catch (err) {
+          console.error(`[swarm] SSE JSON parse error for event "${parsed.event}":`, err);
+          continue;
         }
+
+        await handleSSEEvent(parsed.event, data);
       }
     }
   } catch (err) {
     if (!signal.aborted) {
-      console.error("SSE connection error:", err);
-      // Reconnect after 3 seconds: re-register + SSE
+      const delay = backoffDelay();
+      console.error(`[swarm] SSE connection error, retrying in ${delay}ms:`, (err as Error).message);
+
+      // Escalate backoff: 1s → 2s → 4s → 8s → 16s → 30s cap
+      sseRetryDelay = Math.min(sseRetryDelay * 2, 30000);
+
       setTimeout(async () => {
         if (agentId !== id) return;
         try {
@@ -386,7 +444,7 @@ async function connectSSE(id: string): Promise<void> {
           console.error(`[swarm] Reconnected ${id}`);
         } catch { /* service might still be down */ }
         connectSSE(id);
-      }, 3000);
+      }, delay);
     }
   }
 }

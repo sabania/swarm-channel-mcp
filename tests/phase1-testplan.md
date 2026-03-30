@@ -95,3 +95,33 @@
 | T7.3 | Query "nonexistent skill xyz" | discover tool | Leere Liste oder keine Treffer |
 | T7.4 | Empty Query | discover tool | Error oder alle Agents |
 | T7.5 | Query passt auf mehrere | discover tool | Mehrere relevante Agents, gerankt |
+
+## T8: Input Validation (NEU — Service-Dev)
+
+**Was wurde hinzugefuegt:** Agent-IDs und Felder werden jetzt validiert
+
+| # | Test | Methode | Erwartung |
+|---|------|---------|-----------|
+| T8.1 | Agent ID mit Leerzeichen/Sonderzeichen | curl POST /agents/create | 400 error |
+| T8.2 | XSS in Agent ID | curl POST /agents/create | 400 error |
+| T8.3 | Leerer Agent Name | curl POST /agents/create | 400 error |
+| T8.4 | Agent ID > 100 Zeichen | curl POST /agents/create | 400 error |
+
+## T9: Message Size Limit (NEU — Service-Dev)
+
+**Was wurde hinzugefuegt:** Messages > 32KB werden abgelehnt
+
+| # | Test | Methode | Erwartung |
+|---|------|---------|-----------|
+| T9.1 | Normale kurze Message | curl POST /messages | Erlaubt |
+| T9.2 | Message > 32KB | curl POST /messages | 400 error |
+| T9.3 | Message knapp unter 32KB | curl POST /messages | Erlaubt |
+
+## T2.5-T2.6: Topology Admin View (NEU)
+
+**Loesung fuer UI-Regression:** GET /topology?full=true gibt volle Daten
+
+| # | Test | Methode | Erwartung |
+|---|------|---------|-----------|
+| T2.5 | GET /topology?full=true | curl | cwd vorhanden |
+| T2.6 | GET /topology?full=true | curl | launchCommand vorhanden |

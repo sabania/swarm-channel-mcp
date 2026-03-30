@@ -169,9 +169,13 @@ app.get("/agents/:id/connections", (req, res) => {
 
 // ── Topology ────────────────────────────────────────────────────
 
-app.get("/topology", (_req, res) => {
+app.get("/topology", (req, res) => {
   const topo = getTopology();
-  // Filter nodes to public view — no internal data (cwd, launchCommand, etc.)
+  if (req.query.full === "true") {
+    res.json(topo); // Full data for admin UI (Phase 2: requires auth)
+    return;
+  }
+  // Public view (default) — no cwd, launchCommand, internal description
   const publicNodes: Record<string, ReturnType<typeof toPublicView>> = {};
   for (const [id, agent] of Object.entries(topo.nodes)) {
     publicNodes[id] = toPublicView(agent as any);

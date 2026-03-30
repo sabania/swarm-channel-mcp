@@ -1,5 +1,5 @@
 import { Handle, Position, type NodeProps } from "@xyflow/react";
-import type { AgentInfo } from "./api";
+import type { AgentInfo, AgentCapabilities, CapabilityCategory } from "./api";
 
 export type AgentNodeData = {
   agent: AgentInfo;
@@ -13,9 +13,32 @@ const statusColor: Record<string, string> = {
   offline: "#6b7280",
 };
 
+const capColors: Record<CapabilityCategory, string> = {
+  skills: "#89b4fa",
+  languages: "#a6e3a1",
+  frameworks: "#cba6f7",
+  tools: "#fab387",
+  mcps: "#74c7ec",
+  domains: "#f9e2af",
+};
+
+function getTopBadges(caps: AgentCapabilities | undefined, max: number): { label: string; color: string }[] {
+  if (!caps) return [];
+  const badges: { label: string; color: string }[] = [];
+  const order: CapabilityCategory[] = ["domains", "skills", "languages", "frameworks", "tools", "mcps"];
+  for (const cat of order) {
+    for (const item of caps[cat] || []) {
+      if (badges.length >= max) return badges;
+      badges.push({ label: item, color: capColors[cat] });
+    }
+  }
+  return badges;
+}
+
 export function AgentNode({ data }: NodeProps) {
   const { agent, selected, onSelect } = data as unknown as AgentNodeData;
   const color = statusColor[agent.status] || "#6b7280";
+  const badges = getTopBadges(agent.capabilities, 4);
 
   return (
     <div
@@ -49,6 +72,26 @@ export function AgentNode({ data }: NodeProps) {
         {(agent.description || "").slice(0, 80)}
         {(agent.description || "").length > 80 ? "…" : ""}
       </div>
+      {badges.length > 0 && (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 3, marginTop: 6 }}>
+          {badges.map((b) => (
+            <span
+              key={b.label}
+              style={{
+                fontSize: 9,
+                padding: "1px 5px",
+                borderRadius: 3,
+                background: b.color + "22",
+                color: b.color,
+                fontWeight: 600,
+                lineHeight: 1.4,
+              }}
+            >
+              {b.label}
+            </span>
+          ))}
+        </div>
+      )}
       <div style={{ fontSize: 10, color: "#585b70", marginTop: 4 }}>
         {agent.id}
       </div>

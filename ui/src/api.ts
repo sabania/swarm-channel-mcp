@@ -53,6 +53,17 @@ export interface PublicAgentInfo {
   status: "available" | "busy" | "offline";
 }
 
+export interface AgentCapabilities {
+  skills?: string[];
+  languages?: string[];
+  frameworks?: string[];
+  tools?: string[];
+  mcps?: string[];
+  domains?: string[];
+}
+
+export type CapabilityCategory = keyof AgentCapabilities;
+
 export interface AgentInfo extends PublicAgentInfo {
   publicDescription: string;
   cwd: string;
@@ -60,6 +71,7 @@ export interface AgentInfo extends PublicAgentInfo {
   launchCommand: string;
   registeredAt: string;
   lastSeen: string;
+  capabilities?: AgentCapabilities;
 }
 
 export interface Topology {

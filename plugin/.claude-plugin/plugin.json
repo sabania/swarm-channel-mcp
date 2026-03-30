@@ -1,7 +1,7 @@
 {
   "name": "swarm",
   "description": "Agent swarm channel plugin — register, discover, and communicate with other Claude Code agents in real-time through a central swarm service",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": {
     "name": "Swarm Channel"
   },

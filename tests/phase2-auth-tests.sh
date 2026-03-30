@@ -62,17 +62,28 @@ fi
 echo ""
 echo "--- TA: Token Generation ---"
 
-# TA.1 — Register returns apiKey
+# In enforce mode: create (provision) requires admin key, register is open for provisioned agents
 AGENT1_ID="qa-auth-test-$(date +%s)"
-REG_RESP=$(api_no_auth POST /agents "{\"id\":\"$AGENT1_ID\",\"name\":\"QA Auth Test 1\",\"description\":\"Auth test agent\",\"cwd\":\"C:/tmp\"}")
+AGENT2_ID="qa-auth-test2-$(date +%s)"
+AGENT3_ID="qa-auth-test3-$(date +%s)"
+
+# Pre-provision agents with admin key
+if [ -n "$ADMIN_KEY" ]; then
+  api_with_auth "$ADMIN_KEY" POST /agents/create "{\"id\":\"$AGENT1_ID\",\"name\":\"QA Auth Test 1\",\"description\":\"Auth test agent\",\"cwd\":\"C:/tmp\"}" > /dev/null
+  api_with_auth "$ADMIN_KEY" POST /agents/create "{\"id\":\"$AGENT2_ID\",\"name\":\"QA Auth Test 2\",\"description\":\"Second auth test\",\"cwd\":\"C:/tmp\"}" > /dev/null
+  api_with_auth "$ADMIN_KEY" POST /agents/create "{\"id\":\"$AGENT3_ID\",\"name\":\"QA Auth UI\",\"description\":\"UI create test\",\"cwd\":\"C:/tmp\"}" > /dev/null
+fi
+
+# TA.1 — Register pre-provisioned agent returns apiKey
+REG_RESP=$(api_no_auth POST /agents "{\"id\":\"$AGENT1_ID\",\"name\":\"QA Auth Test 1\",\"description\":\"Auth test agent\"}")
 REG_BODY=$(get_body "$REG_RESP")
 REG_CODE=$(get_code "$REG_RESP")
 AGENT1_KEY=$(echo "$REG_BODY" | node -e "process.stdin.on('data',d=>{try{console.log(JSON.parse(d).apiKey||'')}catch{console.log('')}})" 2>/dev/null)
 
 if [ "$REG_CODE" = "200" ] && [ -n "$AGENT1_KEY" ]; then
-  log_pass "TA.1: POST /agents returns apiKey"
+  log_pass "TA.1: POST /agents (pre-provisioned) returns apiKey"
 else
-  log_fail "TA.1: POST /agents apiKey" "HTTP $REG_CODE, key='$AGENT1_KEY'"
+  log_fail "TA.1: POST /agents apiKey" "HTTP $REG_CODE, key='$AGENT1_KEY', body=$(echo $REG_BODY | head -c 200)"
 fi
 
 # TA.2 — apiKey format (>= 32 chars)
@@ -84,8 +95,7 @@ else
 fi
 
 # TA.3 — Unique keys per agent
-AGENT2_ID="qa-auth-test2-$(date +%s)"
-REG2_RESP=$(api_no_auth POST /agents "{\"id\":\"$AGENT2_ID\",\"name\":\"QA Auth Test 2\",\"description\":\"Second auth test\",\"cwd\":\"C:/tmp\"}")
+REG2_RESP=$(api_no_auth POST /agents "{\"id\":\"$AGENT2_ID\",\"name\":\"QA Auth Test 2\",\"description\":\"Second auth test\"}")
 AGENT2_KEY=$(get_body "$REG2_RESP" | node -e "process.stdin.on('data',d=>{try{console.log(JSON.parse(d).apiKey||'')}catch{console.log('')}})" 2>/dev/null)
 if [ -n "$AGENT2_KEY" ] && [ "$AGENT1_KEY" != "$AGENT2_KEY" ]; then
   log_pass "TA.3: Unique keys per agent"
@@ -93,26 +103,33 @@ else
   log_fail "TA.3: Unique keys" "key1='${AGENT1_KEY:0:8}...' key2='${AGENT2_KEY:0:8}...'"
 fi
 
-# TA.4 — Create from UI does NOT return apiKey (offline agent, key generated at registration)
-AGENT3_ID="qa-auth-test3-$(date +%s)"
-CREATE_RESP=$(api_no_auth POST /agents/create "{\"id\":\"$AGENT3_ID\",\"name\":\"QA Auth UI\",\"description\":\"UI create test\",\"cwd\":\"C:/tmp\"}")
+# TA.4 — Create (admin) does NOT return apiKey
+CREATE_RESP=$(api_with_auth "$ADMIN_KEY" POST /agents/create "{\"id\":\"qa-nokey-$(date +%s)\",\"name\":\"No Key\",\"description\":\"test\",\"cwd\":\"C:/tmp\"}")
 CREATE_BODY=$(get_body "$CREATE_RESP")
-AGENT3_HAS_KEY=$(echo "$CREATE_BODY" | node -e "process.stdin.on('data',d=>{try{console.log(JSON.parse(d).apiKey?'yes':'no')}catch{console.log('no')}})" 2>/dev/null)
-if [ "$AGENT3_HAS_KEY" = "no" ]; then
-  log_pass "TA.4: POST /agents/create does NOT leak apiKey (offline create)"
+AGENT_NOKEY_HAS_KEY=$(echo "$CREATE_BODY" | node -e "process.stdin.on('data',d=>{try{console.log(JSON.parse(d).apiKey?'yes':'no')}catch{console.log('no')}})" 2>/dev/null)
+if [ "$AGENT_NOKEY_HAS_KEY" = "no" ]; then
+  log_pass "TA.4: POST /agents/create does NOT leak apiKey"
 else
   log_fail "TA.4: UI create apiKey leak" "apiKey should not be in create response"
 fi
 
-# TA.5 — Pre-provisioned agent can register and get apiKey
+# TA.5 — Register pre-provisioned agent3
 REG3_RESP=$(api_no_auth POST /agents "{\"id\":\"$AGENT3_ID\",\"name\":\"QA Auth UI\",\"description\":\"UI create test registered\"}")
-REG3_BODY=$(get_body "$REG3_RESP")
 REG3_CODE=$(get_code "$REG3_RESP")
-AGENT3_KEY=$(echo "$REG3_BODY" | node -e "process.stdin.on('data',d=>{try{console.log(JSON.parse(d).apiKey||'')}catch{console.log('')}})" 2>/dev/null)
+AGENT3_KEY=$(get_body "$REG3_RESP" | node -e "process.stdin.on('data',d=>{try{console.log(JSON.parse(d).apiKey||'')}catch{console.log('')}})" 2>/dev/null)
 if [ "$REG3_CODE" = "200" ] && [ -n "$AGENT3_KEY" ]; then
   log_pass "TA.5: Pre-provisioned agent registers and gets apiKey"
 else
   log_fail "TA.5: Pre-provisioned register" "HTTP $REG3_CODE, key='$AGENT3_KEY'"
+fi
+
+# TA.6 — Non-provisioned agent cannot register in enforce mode
+ROGUE_RESP=$(api_no_auth POST /agents "{\"id\":\"qa-rogue-$(date +%s)\",\"name\":\"Rogue\",\"description\":\"not provisioned\"}")
+ROGUE_CODE=$(get_code "$ROGUE_RESP")
+if [ "$ROGUE_CODE" = "403" ]; then
+  log_pass "TA.6: Non-provisioned agent register → 403"
+else
+  log_fail "TA.6: Rogue registration" "Expected 403, got $ROGUE_CODE"
 fi
 
 # Add edge between test agents for message tests
@@ -213,15 +230,15 @@ else
   log_fail "TB.10: SSE no auth" "Expected 401, got $RESP"
 fi
 
-# TB.11 — Registration is open (no auth) but in enforce mode requires pre-provisioned agent
+# TB.11 — Registration is open (no auth) for pre-provisioned agents
 AGENT_OPEN_ID="qa-open-reg-$(date +%s)"
-# First pre-provision via create (no auth needed for create)
-api_no_auth POST /agents/create "{\"id\":\"$AGENT_OPEN_ID\",\"name\":\"Open Reg\",\"description\":\"test\",\"cwd\":\"C:/tmp\"}" > /dev/null
-# Then register (also no auth needed)
+# Pre-provision with admin key
+api_with_auth "$ADMIN_KEY" POST /agents/create "{\"id\":\"$AGENT_OPEN_ID\",\"name\":\"Open Reg\",\"description\":\"test\",\"cwd\":\"C:/tmp\"}" > /dev/null
+# Then register without auth
 RESP=$(api_no_auth POST /agents "{\"id\":\"$AGENT_OPEN_ID\",\"name\":\"Open Reg\",\"description\":\"test\"}")
 CODE=$(get_code "$RESP")
 if [ "$CODE" = "200" ]; then
-  log_pass "TB.11: POST /agents (register) open without auth → 200"
+  log_pass "TB.11: POST /agents (register pre-provisioned) open without auth → 200"
   OPEN_KEY=$(get_body "$RESP" | node -e "process.stdin.on('data',d=>{try{console.log(JSON.parse(d).apiKey||'')}catch{console.log('')}})" 2>/dev/null)
 else
   log_fail "TB.11: Registration open" "Expected 200, got $CODE"

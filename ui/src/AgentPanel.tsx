@@ -1,8 +1,26 @@
 import { useState } from "react";
-import type { AgentInfo } from "./api";
+import type { AgentInfo, AgentCapabilities, CapabilityCategory } from "./api";
 import { updateAgent, removeAgent, launchAgent } from "./api";
 import { TaskList } from "./TaskList";
 import { TaskDetail } from "./TaskDetail";
+
+const capColors: Record<CapabilityCategory, string> = {
+  skills: "#89b4fa",
+  languages: "#a6e3a1",
+  frameworks: "#cba6f7",
+  tools: "#fab387",
+  mcps: "#74c7ec",
+  domains: "#f9e2af",
+};
+
+const capLabels: Record<CapabilityCategory, string> = {
+  skills: "Skills",
+  languages: "Languages",
+  frameworks: "Frameworks",
+  tools: "Tools",
+  mcps: "MCPs",
+  domains: "Domains",
+};
 
 type Tab = "properties" | "tasks";
 
@@ -159,6 +177,39 @@ export function AgentPanel({ agent, onClose, onUpdate, onSelectAgent }: Props) {
             <input type="checkbox" checked={autoconnect} onChange={(e) => setAutoconnect(e.target.checked)} />
             Autoconnect on startup
           </label>
+
+          {/* Capabilities */}
+          {agent.capabilities && Object.keys(agent.capabilities).some((k) => (agent.capabilities as AgentCapabilities)[k as CapabilityCategory]?.length) && (
+            <div style={{ marginTop: 16 }}>
+              <label style={{ ...labelStyle, marginTop: 0 }}>Capabilities</label>
+              {(Object.keys(capLabels) as CapabilityCategory[]).map((cat) => {
+                const items = agent.capabilities?.[cat];
+                if (!items?.length) return null;
+                return (
+                  <div key={cat} style={{ marginBottom: 6 }}>
+                    <div style={{ fontSize: 10, color: "#585b70", marginBottom: 3 }}>{capLabels[cat]}</div>
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+                      {items.map((item) => (
+                        <span
+                          key={item}
+                          style={{
+                            fontSize: 11,
+                            padding: "2px 7px",
+                            borderRadius: 4,
+                            background: capColors[cat] + "22",
+                            color: capColors[cat],
+                            fontWeight: 600,
+                          }}
+                        >
+                          {item}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
 
           <div style={{ fontSize: 11, color: "#585b70", marginTop: 12 }}>
             Registered: {new Date(agent.registeredAt).toLocaleString()}<br />

@@ -736,18 +736,20 @@ export function validateLaunchCommand(cmd: string): string | null {
   return null;
 }
 
-function launchTerminal(cwd: string, command: string): Promise<void> {
+function launchTerminal(cwd: string, command: string, title?: string): Promise<void> {
   return new Promise((resolve, reject) => {
     const platform = os.platform();
-    const args = command.split(/\s+/);
+    const windowTitle = title || "Claude Agent";
 
     let proc;
     if (platform === "win32") {
-      proc = spawn("cmd", ["/c", "start", "cmd", "/k", ...args], { cwd, detached: true, stdio: "ignore" });
+      proc = spawn("cmd", ["/c", "start", windowTitle, "cmd", "/k", command], { cwd, detached: true, stdio: "ignore", shell: true });
     } else if (platform === "darwin") {
-      proc = spawn("open", ["-a", "Terminal", "--args", ...args], { cwd, detached: true, stdio: "ignore" });
+      const escaped = command.replace(/'/g, "\\'");
+      const script = `tell application "Terminal" to do script "printf '\\\\e]0;${windowTitle}\\\\a' && cd '${cwd}' && ${escaped}"`;
+      proc = spawn("osascript", ["-e", script], { detached: true, stdio: "ignore" });
     } else {
-      proc = spawn(args[0], args.slice(1), { cwd, detached: true, stdio: "ignore" });
+      proc = spawn("bash", ["-c", `x-terminal-emulator -T "${windowTitle}" -e bash -c "cd '${cwd}' && ${command}; exec bash" 2>/dev/null || gnome-terminal --title="${windowTitle}" -- bash -c "cd '${cwd}' && ${command}; exec bash"`], { detached: true, stdio: "ignore" });
     }
 
     proc.on("error", reject);
@@ -781,7 +783,7 @@ app.post("/agents/:id/launch", requireAdmin, async (req, res) => {
     return;
   }
 
-  await launchTerminal(agent.cwd, cmd);
+  await launchTerminal(agent.cwd, cmd, `Swarm: ${agent.name} (${agent.id})`);
   logger.info({ event: "agent_launched", agentId: param(req, "id"), cwd: agent.cwd });
   res.json({ ok: true, cwd: agent.cwd });
 });

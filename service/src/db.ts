@@ -2,7 +2,7 @@ import Database from "better-sqlite3";
 import path from "node:path";
 import os from "node:os";
 import crypto from "node:crypto";
-import type { Task, TaskMessage, TaskArtifact, TaskDetail, TaskStatus } from "./types.js";
+import type { Task, TaskMessage, TaskArtifact, TaskDetail, TaskStatus, Edge, EdgeType, EdgePermissions, ConnectionRequest } from "./types.js";
 import { logger } from "./logger.js";
 
 // ── Database Setup ──────────────────────────────────────────────
@@ -71,6 +71,36 @@ db.exec(`
 
   CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_log(timestamp);
   CREATE INDEX IF NOT EXISTS idx_audit_actor ON audit_log(actor);
+
+  CREATE TABLE IF NOT EXISTS edges (
+    id TEXT PRIMARY KEY,
+    from_agent TEXT NOT NULL,
+    to_agent TEXT NOT NULL,
+    type TEXT NOT NULL DEFAULT 'peer',
+    permissions TEXT,
+    created_at TEXT NOT NULL,
+    created_by TEXT NOT NULL,
+    UNIQUE(from_agent, to_agent)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_edges_from ON edges(from_agent);
+  CREATE INDEX IF NOT EXISTS idx_edges_to ON edges(to_agent);
+  CREATE INDEX IF NOT EXISTS idx_edges_type ON edges(type);
+
+  CREATE TABLE IF NOT EXISTS connection_requests (
+    id TEXT PRIMARY KEY,
+    from_agent TEXT NOT NULL,
+    to_agent TEXT NOT NULL,
+    type TEXT NOT NULL DEFAULT 'peer',
+    reason TEXT,
+    status TEXT NOT NULL DEFAULT 'pending',
+    created_at TEXT NOT NULL,
+    responded_at TEXT
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_connreq_from ON connection_requests(from_agent);
+  CREATE INDEX IF NOT EXISTS idx_connreq_to ON connection_requests(to_agent);
+  CREATE INDEX IF NOT EXISTS idx_connreq_status ON connection_requests(status);
 `);
 
 // ── Row → Object Mappers ────────────────────────────────────────
@@ -315,6 +345,114 @@ export function getTaskMetrics(): { total: number; byStatus: Record<string, numb
     total += row.count;
   }
   return { total, byStatus };
+}
+
+// ── Edges (SQLite-backed) ───────────────────────────────────────
+
+const edgeStmts = {
+  insert: db.prepare(`INSERT OR IGNORE INTO edges (id, from_agent, to_agent, type, permissions, created_at, created_by) VALUES (?, ?, ?, ?, ?, ?, ?)`),
+  remove: db.prepare(`DELETE FROM edges WHERE (from_agent = ? AND to_agent = ?) OR (from_agent = ? AND to_agent = ?)`),
+  getAll: db.prepare(`SELECT * FROM edges`),
+  getByType: db.prepare(`SELECT * FROM edges WHERE type = ?`),
+  getForAgent: db.prepare(`SELECT * FROM edges WHERE from_agent = ? OR to_agent = ?`),
+  exists: db.prepare(`SELECT 1 FROM edges WHERE (from_agent = ? AND to_agent = ?) OR (from_agent = ? AND to_agent = ?)`),
+  removeForAgent: db.prepare(`DELETE FROM edges WHERE from_agent = ? OR to_agent = ?`),
+};
+
+function rowToEdge(row: any): Edge {
+  return {
+    id: row.id,
+    fromAgent: row.from_agent,
+    toAgent: row.to_agent,
+    type: row.type as EdgeType,
+    permissions: row.permissions ? JSON.parse(row.permissions) : null,
+    createdAt: row.created_at,
+    createdBy: row.created_by,
+  };
+}
+
+export function dbAddEdge(from: string, to: string, type: EdgeType = "peer", permissions?: EdgePermissions, createdBy: string = "__admin__"): Edge | null {
+  const existing = edgeStmts.exists.get(from, to, to, from);
+  if (existing) return null;
+  const id = crypto.randomUUID();
+  const now = new Date().toISOString();
+  edgeStmts.insert.run(id, from, to, type, permissions ? JSON.stringify(permissions) : null, now, createdBy);
+  return { id, fromAgent: from, toAgent: to, type, permissions: permissions ?? null, createdAt: now, createdBy };
+}
+
+export function dbRemoveEdge(from: string, to: string): boolean {
+  const result = edgeStmts.remove.run(from, to, to, from);
+  return result.changes > 0;
+}
+
+export function dbRemoveEdgesForAgent(agentId: string): number {
+  const result = edgeStmts.removeForAgent.run(agentId, agentId);
+  return result.changes;
+}
+
+export function dbGetEdges(typeFilter?: EdgeType): Edge[] {
+  const rows = typeFilter ? edgeStmts.getByType.all(typeFilter) : edgeStmts.getAll.all();
+  return rows.map(rowToEdge);
+}
+
+export function dbGetEdgesForAgent(agentId: string): Edge[] {
+  return edgeStmts.getForAgent.all(agentId, agentId).map(rowToEdge);
+}
+
+/** Load all edges for adjacency cache rebuild */
+export function dbLoadAllEdgePairs(): [string, string][] {
+  const rows = edgeStmts.getAll.all() as any[];
+  return rows.map((r) => [r.from_agent, r.to_agent]);
+}
+
+// ── Connection Requests ─────────────────────────────────────────
+
+const connReqStmts = {
+  insert: db.prepare(`INSERT INTO connection_requests (id, from_agent, to_agent, type, reason, status, created_at) VALUES (?, ?, ?, ?, ?, 'pending', ?)`),
+  get: db.prepare(`SELECT * FROM connection_requests WHERE id = ?`),
+  updateStatus: db.prepare(`UPDATE connection_requests SET status = ?, responded_at = ? WHERE id = ?`),
+  pending: db.prepare(`SELECT * FROM connection_requests WHERE (from_agent = ? OR to_agent = ?) AND status = 'pending' ORDER BY created_at DESC`),
+  expireOld: db.prepare(`UPDATE connection_requests SET status = 'expired' WHERE status = 'pending' AND created_at < datetime('now', '-7 days')`),
+};
+
+function rowToConnReq(row: any): ConnectionRequest {
+  return {
+    id: row.id,
+    fromAgent: row.from_agent,
+    toAgent: row.to_agent,
+    type: row.type as EdgeType,
+    reason: row.reason,
+    status: row.status,
+    createdAt: row.created_at,
+    respondedAt: row.responded_at,
+  };
+}
+
+export function createConnectionRequest(from: string, to: string, type: EdgeType = "peer", reason?: string): ConnectionRequest {
+  const id = crypto.randomUUID();
+  const now = new Date().toISOString();
+  connReqStmts.insert.run(id, from, to, type, reason ?? null, now);
+  return { id, fromAgent: from, toAgent: to, type, reason: reason ?? null, status: "pending", createdAt: now, respondedAt: null };
+}
+
+export function getConnectionRequest(id: string): ConnectionRequest | null {
+  const row = connReqStmts.get.get(id);
+  return row ? rowToConnReq(row) : null;
+}
+
+export function respondConnectionRequest(id: string, status: "accepted" | "declined"): ConnectionRequest | null {
+  const now = new Date().toISOString();
+  connReqStmts.updateStatus.run(status, now, id);
+  return getConnectionRequest(id);
+}
+
+export function getPendingRequests(agentId: string): ConnectionRequest[] {
+  return connReqStmts.pending.all(agentId, agentId).map(rowToConnReq);
+}
+
+export function expireOldRequests(): number {
+  const result = connReqStmts.expireOld.run();
+  return result.changes;
 }
 
 // ── Audit Log ───────────────────────────────────────────────────

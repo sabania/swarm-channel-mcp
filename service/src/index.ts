@@ -40,6 +40,7 @@ import {
   pushEvent,
   isOnline,
   closeAllSSE,
+  closeSSE,
   saveTopologyNow,
   getSSEMetrics,
   validateAgentId,
@@ -55,7 +56,11 @@ import {
   listTasks, deleteTask, getPendingTasksForAgent, startCleanupTimer, closeDb, getTaskMetrics, checkDbHealth,
   logAudit, queryAuditLog, checkDbIntegrity, backupDb,
 } from "./db.js";
-import { areConnected } from "./store.js";
+import { areConnected, rebuildAdjacency } from "./store.js";
+import {
+  dbAddEdge, dbRemoveEdge, dbRemoveEdgesForAgent, dbGetEdges, dbLoadAllEdgePairs,
+  createConnectionRequest, getConnectionRequest, respondConnectionRequest, getPendingRequests, expireOldRequests,
+} from "./db.js";
 
 const PORT = parseInt(process.env.PORT || "3001", 10);
 const HOST = process.env.HOST || "127.0.0.1";
@@ -339,17 +344,23 @@ app.get("/topology", requireAuth, (req, res) => {
   res.json({ nodes: publicNodes, edges: topo.edges });
 });
 
-// Edge management — Admin only
+// ── Typed Edges — Admin only ────────────────────────────────────
+
 app.post("/edges", requireAdmin, (req, res) => {
-  const { from, to } = req.body;
+  const { from, to, type, permissions } = req.body;
   if (!from || !to) {
     res.status(400).json({ error: "from, to required" });
     return;
   }
-  const ok = addEdge(from, to);
-  logger.info({ event: ok ? "edge_added" : "edge_exists", from, to });
-  if (ok) logAudit(req.authAgent?.id ?? "__admin__", "edge_added", `${from}↔${to}`, undefined, req.ip ?? undefined);
-  res.json({ ok });
+  const edge = dbAddEdge(from, to, type || "peer", permissions, req.authAgent?.id ?? "__admin__");
+  if (!edge) {
+    res.json({ ok: false, error: "Edge already exists or agents not found" });
+    return;
+  }
+  addEdge(from, to); // Update cache + SSE notifications
+  logger.info({ event: "edge_added", from, to, type: edge.type });
+  logAudit(req.authAgent?.id ?? "__admin__", "edge_added", `${from}↔${to}`, { type: edge.type }, req.ip ?? undefined);
+  res.json({ ok: true, edge });
 });
 
 app.delete("/edges", requireAdmin, (req, res) => {
@@ -358,12 +369,154 @@ app.delete("/edges", requireAdmin, (req, res) => {
     res.status(400).json({ error: "from, to required" });
     return;
   }
-  const ok = removeEdge(from, to);
+  const ok = dbRemoveEdge(from, to);
   if (ok) {
+    removeEdge(from, to); // Update cache + SSE notifications
     logger.info({ event: "edge_removed", from, to });
     logAudit(req.authAgent?.id ?? "__admin__", "edge_removed", `${from}↔${to}`, undefined, req.ip ?? undefined);
   }
   res.json({ ok });
+});
+
+app.get("/edges", requireAuth, (req, res) => {
+  const typeFilter = typeof req.query.type === "string" ? req.query.type as any : undefined;
+  res.json(dbGetEdges(typeFilter));
+});
+
+// ── Connection Requests ─────────────────────────────────────────
+
+app.post("/connections/request", requireAuth, (req, res) => {
+  const fromAgent = req.authAgent?.isAdmin ? req.body.from : req.authAgent?.id;
+  const { to, type, reason } = req.body;
+  if (!fromAgent || !to) {
+    res.status(400).json({ error: "to is required" });
+    return;
+  }
+  if (areConnected(fromAgent, to)) {
+    res.status(409).json({ error: "Already connected" });
+    return;
+  }
+  const request = createConnectionRequest(fromAgent, to, type || "peer", reason);
+  if (isOnline(to)) {
+    pushEvent(to, "connection_request", request);
+  }
+  logger.info({ event: "connection_request_created", from: fromAgent, to, type: request.type });
+  res.status(201).json(request);
+});
+
+app.get("/connections/requests", requireAuth, (req, res) => {
+  const agentId = typeof req.query.agent === "string" ? req.query.agent : req.authAgent?.id;
+  if (!agentId) { res.status(400).json({ error: "agent query param required" }); return; }
+  res.json(getPendingRequests(agentId));
+});
+
+app.post("/connections/requests/:id/accept", requireAuth, (req, res) => {
+  const cr = getConnectionRequest(param(req, "id"));
+  if (!cr) { res.status(404).json({ error: "Request not found" }); return; }
+  if (cr.status !== "pending") { res.status(409).json({ error: `Request is ${cr.status}` }); return; }
+  if (!req.authAgent?.isAdmin && req.authAgent?.id !== cr.toAgent) {
+    res.status(403).json({ error: "Only the target agent or admin can accept" });
+    return;
+  }
+  const updated = respondConnectionRequest(cr.id, "accepted");
+  // Create the edge
+  dbAddEdge(cr.fromAgent, cr.toAgent, cr.type, undefined, cr.toAgent);
+  addEdge(cr.fromAgent, cr.toAgent);
+  if (isOnline(cr.fromAgent)) pushEvent(cr.fromAgent, "connection_accepted", updated);
+  logger.info({ event: "connection_accepted", from: cr.fromAgent, to: cr.toAgent });
+  res.json(updated);
+});
+
+app.post("/connections/requests/:id/decline", requireAuth, (req, res) => {
+  const cr = getConnectionRequest(param(req, "id"));
+  if (!cr) { res.status(404).json({ error: "Request not found" }); return; }
+  if (cr.status !== "pending") { res.status(409).json({ error: `Request is ${cr.status}` }); return; }
+  if (!req.authAgent?.isAdmin && req.authAgent?.id !== cr.toAgent) {
+    res.status(403).json({ error: "Only the target agent or admin can decline" });
+    return;
+  }
+  const updated = respondConnectionRequest(cr.id, "declined");
+  if (isOnline(cr.fromAgent)) pushEvent(cr.fromAgent, "connection_declined", updated);
+  logger.info({ event: "connection_declined", from: cr.fromAgent, to: cr.toAgent });
+  res.json(updated);
+});
+
+// ── Agent Provisioning ──────────────────────────────────────────
+
+app.post("/agents/provision", requireAdmin, (req, res) => {
+  const { id, name, email, department, role, cwd } = req.body;
+  const idErr = validateAgentId(id);
+  if (idErr) { res.status(400).json({ error: idErr }); return; }
+  const nameErr = validateAgentName(name);
+  if (nameErr) { res.status(400).json({ error: nameErr }); return; }
+
+  const claimToken = crypto.randomUUID();
+  const agent = createAgent({ id, name, description: `Provisioned agent for ${email || name}`, cwd: cwd || "" });
+  if (!agent) {
+    res.status(409).json({ error: `ID "${id}" already exists` });
+    return;
+  }
+  agent.status = "provisioned" as any;
+  agent.email = email;
+  agent.department = department;
+  agent.role = role;
+  agent.claimToken = claimToken;
+  updateAgent(id, { description: agent.description } as any); // trigger save
+
+  logger.info({ event: "agent_provisioned", agentId: id, email });
+  logAudit(req.authAgent?.id ?? "__admin__", "agent_provisioned", id, { email, department, role }, req.ip ?? undefined);
+  res.status(201).json({ agent, claimToken });
+});
+
+app.post("/agents/:id/claim", async (req, res) => {
+  const agent = getAgent(param(req, "id"));
+  if (!agent) { res.status(404).json({ error: "Agent not found" }); return; }
+  if (agent.status !== "provisioned" as any) {
+    res.status(409).json({ error: "Agent is not in provisioned state" });
+    return;
+  }
+  const { claimToken } = req.body;
+  if (!claimToken || claimToken !== agent.claimToken) {
+    res.status(403).json({ error: "Invalid claim token" });
+    return;
+  }
+  agent.status = "claimed" as any;
+  agent.claimToken = undefined;
+  setAgentStatus(param(req, "id"), "claimed" as any);
+
+  // Generate API key
+  const apiKey = generateApiKey();
+  await storeKey(param(req, "id"), apiKey);
+
+  logger.info({ event: "agent_claimed", agentId: param(req, "id") });
+  logAudit(param(req, "id"), "agent_claimed", param(req, "id"), undefined, req.ip ?? undefined);
+  res.json({ agent, apiKey });
+});
+
+app.post("/agents/:id/suspend", requireAdmin, (req, res) => {
+  const agent = getAgent(param(req, "id"));
+  if (!agent) { res.status(404).json({ error: "Agent not found" }); return; }
+  setAgentStatus(param(req, "id"), "suspended" as any);
+  if (isOnline(param(req, "id"))) {
+    pushEvent(param(req, "id"), "agent_suspended", { reason: req.body.reason || "Suspended by admin" });
+    closeSSE(param(req, "id"));
+  }
+  logger.info({ event: "agent_suspended", agentId: param(req, "id") });
+  logAudit(req.authAgent?.id ?? "__admin__", "agent_suspended", param(req, "id"), undefined, req.ip ?? undefined);
+  res.json({ ok: true });
+});
+
+app.post("/agents/:id/reactivate", requireAdmin, (req, res) => {
+  const agent = getAgent(param(req, "id"));
+  if (!agent) { res.status(404).json({ error: "Agent not found" }); return; }
+  if (agent.status !== "suspended" as any) {
+    res.status(409).json({ error: "Agent is not suspended" });
+    return;
+  }
+  setAgentStatus(param(req, "id"), "offline");
+  logger.info({ event: "agent_reactivated", agentId: param(req, "id") });
+  logAudit(req.authAgent?.id ?? "__admin__", "agent_reactivated", param(req, "id"), undefined, req.ip ?? undefined);
+  res.json({ ok: true });
 });
 
 // ── Messages — Agent+Admin, sender must match ───────────────────
@@ -751,6 +904,9 @@ app.use((err: Error, _req: express.Request, res: Response, _next: NextFunction) 
 const adminKey = initAdminKey();
 
 // ── Startup Checks ──────────────────────────────────────────────
+
+// Rebuild adjacency cache from SQLite edges
+rebuildAdjacency(dbLoadAllEdgePairs());
 
 const integrityResult = checkDbIntegrity();
 if (integrityResult !== "ok") {

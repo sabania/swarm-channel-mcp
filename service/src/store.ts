@@ -131,12 +131,17 @@ function loadEdges(edges: [string, string][]): Map<string, Set<string>> {
 
 const saved = loadTopology();
 const agents = new Map<string, AgentInfo>(Object.entries(saved.nodes));
-const adjacency = loadEdges(saved.edges);
+let adjacency = loadEdges(saved.edges);
 const sseConnections = new Map<string, Response[]>();
 const offlineTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
 for (const agent of agents.values()) {
   agent.status = "offline";
+}
+
+/** Rebuild adjacency cache from edge pairs (called after SQLite migration) */
+export function rebuildAdjacency(edgePairs: [string, string][]): void {
+  adjacency = loadEdges(edgePairs);
 }
 
 // ── Public View ─────────────────────────────────────────────────
@@ -269,6 +274,7 @@ export function areConnected(a: string, b: string): boolean {
   return adjacency.get(a)?.has(b) ?? false;
 }
 
+/** Update adjacency cache + notify. SQLite write handled by caller in index.ts */
 export function addEdge(a: string, b: string): boolean {
   if (a === b) return false;
   if (areConnected(a, b)) return false;
@@ -278,7 +284,6 @@ export function addEdge(a: string, b: string): boolean {
   if (!adjacency.has(b)) adjacency.set(b, new Set());
   adjacency.get(a)!.add(b);
   adjacency.get(b)!.add(a);
-  saveTopology();
 
   // Notify both sides
   const agentA = agents.get(a)!;
@@ -294,6 +299,7 @@ export function addEdge(a: string, b: string): boolean {
   return true;
 }
 
+/** Update adjacency cache + notify. SQLite write handled by caller in index.ts */
 export function removeEdge(a: string, b: string): boolean {
   const setA = adjacency.get(a);
   const setB = adjacency.get(b);
@@ -305,8 +311,6 @@ export function removeEdge(a: string, b: string): boolean {
   // Clean up empty sets
   if (setA.size === 0) adjacency.delete(a);
   if (setB && setB.size === 0) adjacency.delete(b);
-
-  saveTopology();
 
   // Notify both sides
   if (isOnline(a)) {

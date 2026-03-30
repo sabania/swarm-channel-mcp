@@ -9,6 +9,8 @@ export interface AgentCapabilities {
   domains?: string[];
 }
 
+export type AgentStatus = "provisioned" | "claimed" | "available" | "busy" | "offline" | "suspended" | "decommissioned";
+
 export interface AgentInfo {
   id: string;
   name: string;
@@ -17,10 +19,50 @@ export interface AgentInfo {
   cwd: string;
   autoconnect: boolean;
   launchCommand: string;       // customizable per agent
-  status: "available" | "busy" | "offline";
+  status: AgentStatus;
   capabilities?: AgentCapabilities;
+  email?: string;
+  department?: string;
+  role?: string;
+  claimToken?: string;         // one-time token for claiming provisioned agents
   registeredAt: string;
   lastSeen: string;
+}
+
+// ── Typed Edges ─────────────────────────────────────────────────
+
+export type EdgeType = "peer" | "reports-to" | "team" | "department" | "custom";
+
+export interface EdgePermissions {
+  canDelegate?: boolean;
+  canAudit?: boolean;
+  canOverride?: boolean;
+  canManage?: boolean;
+}
+
+export interface Edge {
+  id: string;
+  fromAgent: string;
+  toAgent: string;
+  type: EdgeType;
+  permissions: EdgePermissions | null;
+  createdAt: string;
+  createdBy: string;
+}
+
+// ── Connection Requests ─────────────────────────────────────────
+
+export type ConnectionRequestStatus = "pending" | "accepted" | "declined" | "expired";
+
+export interface ConnectionRequest {
+  id: string;
+  fromAgent: string;
+  toAgent: string;
+  type: EdgeType;
+  reason: string | null;
+  status: ConnectionRequestStatus;
+  createdAt: string;
+  respondedAt: string | null;
 }
 
 /** What other agents see */
@@ -28,7 +70,7 @@ export interface AgentPublicView {
   id: string;
   name: string;
   description: string;  // publicDescription or fallback to description
-  status: "available" | "busy" | "offline";
+  status: AgentStatus;
 }
 
 export interface SwarmTopology {

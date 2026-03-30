@@ -1,4 +1,5 @@
-import fs from "node:fs";
+import fs from "node:fs/promises";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import type { Response } from "express";
@@ -10,30 +11,126 @@ const DATA_DIR = process.env.SWARM_DATA_DIR || path.join(os.homedir(), ".swarm-c
 const TOPOLOGY_FILE = path.join(DATA_DIR, "topology.json");
 
 function ensureDir(): void {
-  if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+  if (!existsSync(DATA_DIR)) mkdirSync(DATA_DIR, { recursive: true });
+}
+
+// Debounced persistence — coalesces rapid writes into one disk I/O
+const SAVE_DEBOUNCE_MS = 500;
+let saveTimer: ReturnType<typeof setTimeout> | null = null;
+let saveInFlight: Promise<void> | null = null;
+
+async function writeToDisk(): Promise<void> {
+  ensureDir();
+  const data: SwarmTopology = {
+    nodes: Object.fromEntries(agents),
+    edges: serializeEdges(),
+  };
+  const tmp = TOPOLOGY_FILE + ".tmp";
+  await fs.writeFile(tmp, JSON.stringify(data, null, 2), "utf-8");
+  await fs.rename(tmp, TOPOLOGY_FILE);
 }
 
 function saveTopology(): void {
-  ensureDir();
-  const data: SwarmTopology = { nodes: Object.fromEntries(agents), edges };
-  const tmp = TOPOLOGY_FILE + ".tmp";
-  fs.writeFileSync(tmp, JSON.stringify(data, null, 2), "utf-8");
-  fs.renameSync(tmp, TOPOLOGY_FILE);
+  if (saveTimer) clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => {
+    saveTimer = null;
+    saveInFlight = writeToDisk().catch((err) => {
+      console.error("Failed to save topology:", err);
+    }).finally(() => {
+      saveInFlight = null;
+    });
+  }, SAVE_DEBOUNCE_MS);
+}
+
+/** Force-save immediately — flushes pending debounce (used during shutdown) */
+export async function saveTopologyNow(): Promise<void> {
+  if (saveTimer) {
+    clearTimeout(saveTimer);
+    saveTimer = null;
+  }
+  // Wait for in-flight write to finish, then write current state
+  if (saveInFlight) await saveInFlight;
+  await writeToDisk();
 }
 
 function loadTopology(): SwarmTopology {
+  // Sync on startup only — before server starts listening
   try {
-    return JSON.parse(fs.readFileSync(TOPOLOGY_FILE, "utf-8"));
+    return JSON.parse(readFileSync(TOPOLOGY_FILE, "utf-8"));
   } catch {
     return { nodes: {}, edges: [] };
   }
+}
+
+// ── Adjacency helpers ──────────────────────────────────────────
+
+function serializeEdges(): [string, string][] {
+  const result: [string, string][] = [];
+  const seen = new Set<string>();
+  for (const [a, neighbors] of adjacency) {
+    for (const b of neighbors) {
+      const key = a < b ? `${a}:${b}` : `${b}:${a}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        result.push(a < b ? [a, b] : [b, a]);
+      }
+    }
+  }
+  return result;
+}
+
+// ── Input Validation ────────────────────────────────────────────
+
+const AGENT_ID_RE = /^[a-z0-9][a-z0-9._-]*$/;
+const MAX_ID_LEN = 64;
+const MAX_NAME_LEN = 128;
+const MAX_DESC_LEN = 16384;
+const MAX_MSG_LEN = 32768;
+
+export function validateAgentId(id: unknown): string | null {
+  if (typeof id !== "string") return "id must be a string";
+  if (id.length === 0) return "id is required";
+  if (id.length > MAX_ID_LEN) return `id exceeds ${MAX_ID_LEN} characters`;
+  if (!AGENT_ID_RE.test(id)) return "id must be lowercase alphanumeric (a-z0-9), starting with letter/digit, may contain . _ -";
+  return null;
+}
+
+export function validateAgentName(name: unknown): string | null {
+  if (typeof name !== "string") return "name must be a string";
+  if (name.length === 0) return "name is required";
+  if (name.length > MAX_NAME_LEN) return `name exceeds ${MAX_NAME_LEN} characters`;
+  return null;
+}
+
+export function validateDescription(desc: unknown): string | null {
+  if (typeof desc !== "string") return "description must be a string";
+  if (desc.length > MAX_DESC_LEN) return `description exceeds ${MAX_DESC_LEN} characters`;
+  return null;
+}
+
+export function validateMessageContent(content: unknown): string | null {
+  if (typeof content !== "string") return "content must be a string";
+  if (content.length === 0) return "content is required";
+  if (content.length > MAX_MSG_LEN) return `content exceeds ${MAX_MSG_LEN} characters`;
+  return null;
+}
+
+function loadEdges(edges: [string, string][]): Map<string, Set<string>> {
+  const adj = new Map<string, Set<string>>();
+  for (const [a, b] of edges) {
+    if (!adj.has(a)) adj.set(a, new Set());
+    if (!adj.has(b)) adj.set(b, new Set());
+    adj.get(a)!.add(b);
+    adj.get(b)!.add(a);
+  }
+  return adj;
 }
 
 // ── State ───────────────────────────────────────────────────────
 
 const saved = loadTopology();
 const agents = new Map<string, AgentInfo>(Object.entries(saved.nodes));
-const edges: [string, string][] = saved.edges;
+const adjacency = loadEdges(saved.edges);
 const sseConnections = new Map<string, Response[]>();
 const offlineTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
@@ -89,15 +186,20 @@ export function closeSSE(agentId: string): void {
   sseConnections.delete(agentId);
 }
 
+/** Close ALL SSE connections (used during shutdown) */
+export function closeAllSSE(): void {
+  for (const [, conns] of sseConnections) {
+    for (const res of conns) {
+      res.end();
+    }
+  }
+  sseConnections.clear();
+}
+
 // ── Graph / Topology ────────────────────────────────────────────
 
 export function getConnectedIds(agentId: string): string[] {
-  const ids = new Set<string>();
-  for (const [a, b] of edges) {
-    if (a === agentId) ids.add(b);
-    if (b === agentId) ids.add(a);
-  }
-  return [...ids];
+  return [...(adjacency.get(agentId) ?? [])];
 }
 
 export function getConnectedAgents(agentId: string): AgentPublicView[] {
@@ -108,16 +210,18 @@ export function getConnectedAgents(agentId: string): AgentPublicView[] {
 }
 
 export function areConnected(a: string, b: string): boolean {
-  return edges.some(
-    ([x, y]) => (x === a && y === b) || (x === b && y === a)
-  );
+  return adjacency.get(a)?.has(b) ?? false;
 }
 
 export function addEdge(a: string, b: string): boolean {
   if (a === b) return false;
   if (areConnected(a, b)) return false;
   if (!agents.has(a) || !agents.has(b)) return false;
-  edges.push([a, b]);
+
+  if (!adjacency.has(a)) adjacency.set(a, new Set());
+  if (!adjacency.has(b)) adjacency.set(b, new Set());
+  adjacency.get(a)!.add(b);
+  adjacency.get(b)!.add(a);
   saveTopology();
 
   // Notify both sides
@@ -135,11 +239,17 @@ export function addEdge(a: string, b: string): boolean {
 }
 
 export function removeEdge(a: string, b: string): boolean {
-  const idx = edges.findIndex(
-    ([x, y]) => (x === a && y === b) || (x === b && y === a)
-  );
-  if (idx === -1) return false;
-  edges.splice(idx, 1);
+  const setA = adjacency.get(a);
+  const setB = adjacency.get(b);
+  if (!setA?.has(b)) return false;
+
+  setA.delete(b);
+  setB?.delete(a);
+
+  // Clean up empty sets
+  if (setA.size === 0) adjacency.delete(a);
+  if (setB && setB.size === 0) adjacency.delete(b);
+
   saveTopology();
 
   // Notify both sides
@@ -154,11 +264,11 @@ export function removeEdge(a: string, b: string): boolean {
 }
 
 export function getEdges(): [string, string][] {
-  return [...edges];
+  return serializeEdges();
 }
 
 export function getTopology(): SwarmTopology {
-  return { nodes: Object.fromEntries(agents), edges: [...edges] };
+  return { nodes: Object.fromEntries(agents), edges: serializeEdges() };
 }
 
 // ── Agent Registry ──────────────────────────────────────────────
@@ -288,13 +398,19 @@ export function removeAgent(agentId: string): boolean {
     closeSSE(agentId);
   }
 
-  // 4. Remove from store
-  agents.delete(agentId);
-  for (let i = edges.length - 1; i >= 0; i--) {
-    if (edges[i][0] === agentId || edges[i][1] === agentId) {
-      edges.splice(i, 1);
+  // 4. Remove from adjacency map
+  const neighbors = adjacency.get(agentId);
+  if (neighbors) {
+    for (const peer of neighbors) {
+      adjacency.get(peer)?.delete(agentId);
+      const peerSet = adjacency.get(peer);
+      if (peerSet && peerSet.size === 0) adjacency.delete(peer);
     }
+    adjacency.delete(agentId);
   }
+
+  // 5. Remove from agents
+  agents.delete(agentId);
   saveTopology();
   return true;
 }
@@ -306,9 +422,13 @@ export function updateAgent(agentId: string, updates: Partial<Pick<AgentInfo, "n
   const newId = updates.id;
   const idChanged = newId && newId !== agentId;
 
-  // Apply non-id updates
-  const { id: _id, ...rest } = updates;
-  Object.assign(agent, rest);
+  // Apply only whitelisted fields
+  const allowed: (keyof AgentInfo)[] = ["name", "description", "publicDescription", "cwd", "autoconnect", "launchCommand"];
+  for (const key of allowed) {
+    if (key in updates && updates[key as keyof typeof updates] !== undefined) {
+      (agent as any)[key] = updates[key as keyof typeof updates];
+    }
+  }
 
   // Handle ID change
   if (idChanged && newId) {
@@ -317,10 +437,18 @@ export function updateAgent(agentId: string, updates: Partial<Pick<AgentInfo, "n
     agents.delete(agentId);
     agents.set(newId, agent);
 
-    // Update all edges
-    for (let i = 0; i < edges.length; i++) {
-      if (edges[i][0] === agentId) edges[i] = [newId, edges[i][1]];
-      if (edges[i][1] === agentId) edges[i] = [edges[i][0], newId];
+    // Update adjacency map
+    const neighbors = adjacency.get(agentId);
+    if (neighbors) {
+      adjacency.delete(agentId);
+      adjacency.set(newId, neighbors);
+      for (const peer of neighbors) {
+        const peerSet = adjacency.get(peer);
+        if (peerSet) {
+          peerSet.delete(agentId);
+          peerSet.add(newId);
+        }
+      }
     }
 
     // Move SSE connections

@@ -20856,6 +20856,17 @@ var TOOLS = [
         description: {
           type: "string",
           description: "Comprehensive description of this agent. Include: your role, what you can do, your workspace context, installed skills, available MCPs, and any special capabilities. Be thorough \u2014 this is how other agents will know what you can help with."
+        },
+        capabilities: {
+          type: "object",
+          description: "Structured capabilities for discovery. All fields are optional arrays of strings.",
+          properties: {
+            skills: { type: "array", items: { type: "string" }, description: "Installed skills (e.g. 'frontend-design', 'webapp-testing')" },
+            languages: { type: "array", items: { type: "string" }, description: "Programming languages (e.g. 'typescript', 'python')" },
+            frameworks: { type: "array", items: { type: "string" }, description: "Frameworks (e.g. 'react', 'express', 'fastapi')" },
+            tools: { type: "array", items: { type: "string" }, description: "Available tools and MCPs" },
+            domains: { type: "array", items: { type: "string" }, description: "Domain expertise (e.g. 'backend', 'frontend', 'qa', 'devops')" }
+          }
         }
       },
       required: ["id", "name", "description"]
@@ -20868,12 +20879,23 @@ var TOOLS = [
   },
   {
     name: "update_profile",
-    description: "Update your own description or name in the swarm (not ID). Use when your capabilities change, e.g. new MCP installed or workspace changed.",
+    description: "Update your profile in the swarm. Use when your capabilities change, e.g. new MCP installed or workspace changed.",
     inputSchema: {
       type: "object",
       properties: {
         name: { type: "string", description: "New name (optional)" },
-        description: { type: "string", description: "New description (optional)" }
+        description: { type: "string", description: "New description (optional)" },
+        capabilities: {
+          type: "object",
+          description: "Updated structured capabilities (optional). All fields are optional arrays of strings.",
+          properties: {
+            skills: { type: "array", items: { type: "string" } },
+            languages: { type: "array", items: { type: "string" } },
+            frameworks: { type: "array", items: { type: "string" } },
+            tools: { type: "array", items: { type: "string" } },
+            domains: { type: "array", items: { type: "string" } }
+          }
+        }
       }
     }
   },
@@ -20889,13 +20911,15 @@ var TOOLS = [
   },
   {
     name: "discover",
-    description: "Search for agents by what they can do. Searches descriptions of connected agents.",
+    description: "Search for agents by what they can do. Use query for free-text search, or structured filters for precise matching. Both can be combined.",
     inputSchema: {
       type: "object",
       properties: {
-        query: { type: "string", description: "What you're looking for, e.g. 'react development' or 'someone who can review code'" }
-      },
-      required: ["query"]
+        query: { type: "string", description: "Free-text search against agent name and description" },
+        skills: { type: "array", items: { type: "string" }, description: "Filter by skills (e.g. ['frontend-design', 'webapp-testing'])" },
+        domains: { type: "array", items: { type: "string" }, description: "Filter by domain (e.g. ['backend', 'frontend'])" },
+        languages: { type: "array", items: { type: "string" }, description: "Filter by language (e.g. ['typescript', 'python'])" }
+      }
     }
   },
   {
@@ -21029,8 +21053,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   try {
     switch (name) {
       case "register": {
-        const { id, name: agentName, description } = args;
-        const regResult = await api("POST", "/agents", { id, name: agentName, description, cwd: process.cwd() });
+        const { id, name: agentName, description, capabilities } = args;
+        const regBody = { id, name: agentName, description, cwd: process.cwd() };
+        if (capabilities) regBody.capabilities = capabilities;
+        const regResult = await api("POST", "/agents", regBody);
         agentId = id;
         agentApiKey = regResult.apiKey || null;
         saveLocalConfig({ id, autoconnect: true, apiKey: agentApiKey || void 0 });
@@ -21059,7 +21085,8 @@ Note: You also have access to all skills, MCPs, and tools configured in your Cla
         const a = args;
         if (a.name) updates.name = a.name;
         if (a.description) updates.description = a.description;
-        if (Object.keys(updates).length === 0) return text("Nothing to update. Provide name and/or description.");
+        if (a.capabilities) updates.capabilities = a.capabilities;
+        if (Object.keys(updates).length === 0) return text("Nothing to update. Provide name, description, and/or capabilities.");
         const updated = await api("PATCH", `/agents/${agentId}`, updates);
         return text(`Profile updated:
 ${JSON.stringify(updated, null, 2)}`);
@@ -21079,19 +21106,33 @@ ${JSON.stringify(updated, null, 2)}`);
       }
       case "discover": {
         if (!agentId) return text("You must register first.");
-        const { query } = args;
+        const { query, skills, domains, languages } = args;
         const allAgents = await api("GET", `/agents/${agentId}/connections`);
-        if (!query) return text(JSON.stringify(allAgents, null, 2));
-        const keywords = query.toLowerCase().split(/\s+/);
+        const hasFilters = query || skills?.length || domains?.length || languages?.length;
+        if (!hasFilters) return text(JSON.stringify(allAgents, null, 2));
         const matched = allAgents.filter((a) => {
-          const haystack = `${a.name} ${a.description}`.toLowerCase();
-          return keywords.some((kw) => haystack.includes(kw));
+          if (query) {
+            const keywords = query.toLowerCase().split(/\s+/);
+            const haystack = `${a.name} ${a.description}`.toLowerCase();
+            if (!keywords.some((kw) => haystack.includes(kw))) return false;
+          }
+          const caps = a.capabilities || {};
+          const matchCap = (filter, field) => {
+            if (!filter?.length) return true;
+            const values = (caps[field] || []).map((v) => v.toLowerCase());
+            return filter.some((f) => values.includes(f.toLowerCase()));
+          };
+          if (!matchCap(skills, "skills")) return false;
+          if (!matchCap(domains, "domains")) return false;
+          if (!matchCap(languages, "languages")) return false;
+          return true;
         });
+        const filterDesc = [query, skills?.join(","), domains?.join(","), languages?.join(",")].filter(Boolean).join(", ");
         if (matched.length === 0) {
-          return text(`No agents found matching "${query}". Connected agents:
+          return text(`No agents found matching "${filterDesc}". Connected agents:
 ${JSON.stringify(allAgents, null, 2)}`);
         }
-        return text(`Found ${matched.length} agent(s) matching "${query}":
+        return text(`Found ${matched.length} agent(s) matching "${filterDesc}":
 ${JSON.stringify(matched, null, 2)}`);
       }
       case "send_message": {

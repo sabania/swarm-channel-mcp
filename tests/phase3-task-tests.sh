@@ -348,13 +348,20 @@ if [ -n "$AU_ID" ]; then
     log_pass "TAU.7: Sender updates → $CODE (may be allowed)"
   fi
 
-  # TAU.8 — Receiver updates
-  RESP=$(api_b PATCH "/tasks/$AU_ID" '{"status":"working"}')
+  # TAU.8 — Receiver updates (use next valid transition since auth=off may have allowed TAU.7)
+  CUR_STATUS=$(jf "$(get_body "$(api_b GET "/tasks/$AU_ID")")" "status")
+  if [ "$CUR_STATUS" = "submitted" ]; then
+    RESP=$(api_b PATCH "/tasks/$AU_ID" '{"status":"working"}')
+  elif [ "$CUR_STATUS" = "working" ]; then
+    RESP=$(api_b PATCH "/tasks/$AU_ID" '{"status":"completed"}')
+  else
+    RESP=$(api_b PATCH "/tasks/$AU_ID" '{"status":"working"}')
+  fi
   CODE=$(get_code "$RESP")
   if [ "$CODE" = "200" ]; then
-    log_pass "TAU.8: Receiver updates → 200"
+    log_pass "TAU.8: Receiver updates (from $CUR_STATUS) → 200"
   else
-    log_fail "TAU.8: Receiver update" "Expected 200, got $CODE"
+    log_fail "TAU.8: Receiver update" "Expected 200, got $CODE (was in $CUR_STATUS)"
   fi
   api_a DELETE "/tasks/$AU_ID" > /dev/null
 fi

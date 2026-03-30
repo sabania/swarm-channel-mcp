@@ -128,3 +128,74 @@ export async function createAgent(agent: {
   return res.json();
 }
 
+// ── Task Types ─────────────────────────────────────────────────
+
+export type TaskStatus = "submitted" | "working" | "input-required" | "completed" | "failed" | "canceled";
+
+export interface Task {
+  id: string;
+  contextId?: string;
+  fromAgent: string;
+  toAgent: string;
+  status: TaskStatus;
+  title?: string;
+  createdAt: string;
+  updatedAt: string;
+  completedAt?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface TaskMessage {
+  id: string;
+  taskId: string;
+  role: "sender" | "receiver";
+  agentId: string;
+  content: string;
+  createdAt: string;
+}
+
+export interface TaskArtifact {
+  id: string;
+  taskId: string;
+  name: string;
+  mimeType: string;
+  data: string;
+  createdAt: string;
+}
+
+export interface TaskDetail {
+  task: Task;
+  messages: TaskMessage[];
+  artifacts: TaskArtifact[];
+}
+
+// ── Task API ───────────────────────────────────────────────────
+
+export async function fetchTasks(agentId: string): Promise<Task[]> {
+  const res = await apiFetch(`${BASE}/tasks?to=${encodeURIComponent(agentId)}`);
+  return res.json();
+}
+
+export async function fetchTask(taskId: string): Promise<TaskDetail> {
+  const res = await apiFetch(`${BASE}/tasks/${encodeURIComponent(taskId)}`);
+  return res.json();
+}
+
+export async function createTask(from: string, to: string, title: string, content: string): Promise<Task & { error?: string }> {
+  const res = await apiFetch(`${BASE}/tasks`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ from, to, title, content }),
+  });
+  return res.json();
+}
+
+export async function updateTask(taskId: string, status: TaskStatus): Promise<Task & { error?: string }> {
+  const res = await apiFetch(`${BASE}/tasks/${encodeURIComponent(taskId)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ status }),
+  });
+  return res.json();
+}
+

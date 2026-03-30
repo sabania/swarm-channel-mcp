@@ -5,6 +5,7 @@ import { DashboardPage } from "./pages/DashboardPage";
 import { AdminPage } from "./pages/AdminPage";
 import { TasksPage } from "./pages/TasksPage";
 import { TaskDetailPage } from "./pages/TaskDetailPage";
+import { ConnectionsPage } from "./pages/ConnectionsPage";
 import { colors } from "./theme";
 
 function Layout() {
@@ -29,6 +30,7 @@ export default function App() {
         } />
         <Route path="tasks" element={<TasksPage />} />
         <Route path="tasks/:taskId" element={<TaskDetailPage />} />
+        <Route path="connections" element={<ConnectionsPage />} />
         <Route path="*" element={<Navigate to="/dashboard" replace />} />
       </Route>
     </Routes>

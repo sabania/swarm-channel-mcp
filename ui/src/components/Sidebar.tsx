@@ -4,6 +4,7 @@ import { colors, fonts } from "../theme";
 
 const navItems = [
   { to: "/dashboard", label: "Dashboard", adminOnly: false },
+  { to: "/connections", label: "Connections", adminOnly: false },
   { to: "/tasks", label: "Tasks", adminOnly: false },
   { to: "/admin", label: "Topology", adminOnly: true },
 ];

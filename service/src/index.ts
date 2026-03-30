@@ -40,8 +40,14 @@ import {
   validateDescription,
   validateMessageContent,
 } from "./store.js";
+import { isValidTransition, type TaskStatus } from "./types.js";
 import { generateApiKey, storeKey, removeKey, remapKey, initAdminKey, hasKey } from "./auth.js";
 import { authenticate, requireAuth, requireAdmin, requireSelfOrAdmin, requireSenderMatch, getAuthMode } from "./middleware.js";
+import {
+  createTask, getTask, getTaskDetail, updateTaskStatus, addTaskMessage, addTaskArtifact,
+  listTasks, deleteTask, getPendingTasksForAgent, startCleanupTimer, closeDb,
+} from "./db.js";
+import { areConnected } from "./store.js";
 
 const PORT = parseInt(process.env.PORT || "3001", 10);
 const HOST = process.env.HOST || "127.0.0.1";
@@ -144,6 +150,21 @@ app.post("/agents/:id/connect", requireAuth, requireSelfOrAdmin("id"), (req, res
 
   const connected = getConnectedAgents(param(req, "id"));
   console.log(`↑ Agent reconnected: ${param(req, "id")} (${agent.name})`);
+
+  // Deliver pending tasks via SSE (deferred so SSE connection is established first)
+  const agentIdForPending = param(req, "id");
+  setTimeout(() => {
+    const pending = getPendingTasksForAgent(agentIdForPending);
+    for (const task of pending) {
+      if (isOnline(agentIdForPending)) {
+        pushEvent(agentIdForPending, "task_created", task);
+      }
+    }
+    if (pending.length > 0) {
+      console.log(`📋 Delivered ${pending.length} pending task(s) to ${agentIdForPending}`);
+    }
+  }, 1000);
+
   res.json({ agent, connections: connected });
 });
 
@@ -294,6 +315,175 @@ app.post("/messages/broadcast", requireAuth, requireSenderMatch, (req, res) => {
   res.json({ delivered });
 });
 
+// ── Tasks (A2A-compatible) ──────────────────────────────────────
+
+// Create task — requireAuth, sender must be connected to receiver
+app.post("/tasks", requireAuth, (req, res) => {
+  const { toAgent, title, contextId, ttlSeconds, metadata } = req.body;
+  const fromAgent = req.authAgent?.isAdmin ? req.body.fromAgent : req.authAgent?.id;
+  if (!fromAgent || !toAgent) {
+    res.status(400).json({ error: "fromAgent and toAgent required" });
+    return;
+  }
+  if (!req.authAgent?.isAdmin && !areConnected(fromAgent, toAgent)) {
+    res.status(403).json({ error: `No connection between ${fromAgent} and ${toAgent}` });
+    return;
+  }
+  const task = createTask({ fromAgent, toAgent, title, contextId, ttlSeconds, metadata });
+
+  // Push SSE event to receiver
+  if (isOnline(toAgent)) {
+    pushEvent(toAgent, "task_created", task);
+  }
+  console.log(`📋 Task created: ${task.id} (${fromAgent} → ${toAgent})`);
+  res.status(201).json(task);
+});
+
+// Get task detail — sender, receiver, or admin
+app.get("/tasks/:id", requireAuth, (req, res) => {
+  const task = getTaskDetail(param(req, "id"));
+  if (!task) {
+    res.status(404).json({ error: "Task not found" });
+    return;
+  }
+  if (!req.authAgent?.isAdmin && req.authAgent?.id !== task.fromAgent && req.authAgent?.id !== task.toAgent) {
+    res.status(403).json({ error: "Access denied — only sender, receiver, or admin can view this task" });
+    return;
+  }
+  res.json(task);
+});
+
+// Update task status — assigned agent (toAgent) or admin, valid transition only
+app.patch("/tasks/:id", requireAuth, (req, res) => {
+  const task = getTask(param(req, "id"));
+  if (!task) {
+    res.status(404).json({ error: "Task not found" });
+    return;
+  }
+  if (!req.authAgent?.isAdmin && req.authAgent?.id !== task.toAgent && req.authAgent?.id !== task.fromAgent) {
+    res.status(403).json({ error: "Only assigned agent, sender, or admin can update task status" });
+    return;
+  }
+  const { status } = req.body;
+  if (!status || !isValidTransition(task.status, status)) {
+    res.status(400).json({ error: `Invalid transition: ${task.status} → ${status}. Allowed: ${JSON.stringify(TASK_TRANSITIONS_FOR_ERROR(task.status))}` });
+    return;
+  }
+  const updated = updateTaskStatus(task.id, status as TaskStatus);
+
+  // Push SSE events to both parties
+  for (const agentId of [task.fromAgent, task.toAgent]) {
+    if (isOnline(agentId)) {
+      pushEvent(agentId, "task_updated", updated);
+    }
+  }
+  console.log(`📋 Task ${task.id}: ${task.status} → ${status}`);
+  res.json(updated);
+});
+
+// Add message to task — sender or receiver only
+app.post("/tasks/:id/messages", requireAuth, (req, res) => {
+  const task = getTask(param(req, "id"));
+  if (!task) {
+    res.status(404).json({ error: "Task not found" });
+    return;
+  }
+  const agentId = req.authAgent?.id;
+  if (!req.authAgent?.isAdmin && agentId !== task.fromAgent && agentId !== task.toAgent) {
+    res.status(403).json({ error: "Only sender or receiver can add messages" });
+    return;
+  }
+  const { content } = req.body;
+  if (!content || typeof content !== "string") {
+    res.status(400).json({ error: "content is required" });
+    return;
+  }
+  const role = agentId === task.fromAgent ? "sender" : "receiver";
+  const message = addTaskMessage({ taskId: task.id, role, agentId: agentId!, content });
+
+  // Push to the other party
+  const otherAgent = agentId === task.fromAgent ? task.toAgent : task.fromAgent;
+  if (isOnline(otherAgent)) {
+    pushEvent(otherAgent, "task_message", { taskId: task.id, message });
+  }
+  res.status(201).json(message);
+});
+
+// Add artifact to task
+app.post("/tasks/:id/artifacts", requireAuth, (req, res) => {
+  const task = getTask(param(req, "id"));
+  if (!task) {
+    res.status(404).json({ error: "Task not found" });
+    return;
+  }
+  if (!req.authAgent?.isAdmin && req.authAgent?.id !== task.toAgent && req.authAgent?.id !== task.fromAgent) {
+    res.status(403).json({ error: "Only sender, receiver, or admin can add artifacts" });
+    return;
+  }
+  const { name, mimeType, data } = req.body;
+  if (!name || !data) {
+    res.status(400).json({ error: "name and data required" });
+    return;
+  }
+  const artifact = addTaskArtifact({ taskId: task.id, name, mimeType, data });
+
+  // Push to both parties
+  for (const agentId of [task.fromAgent, task.toAgent]) {
+    if (isOnline(agentId)) {
+      pushEvent(agentId, "task_artifact", { taskId: task.id, artifact });
+    }
+  }
+  res.status(201).json(artifact);
+});
+
+// List tasks — filtered by query params
+app.get("/tasks", requireAuth, (req, res) => {
+  const tasks = listTasks({
+    toAgent: typeof req.query.to === "string" ? req.query.to : undefined,
+    fromAgent: typeof req.query.from === "string" ? req.query.from : undefined,
+    status: typeof req.query.status === "string" ? req.query.status as TaskStatus : undefined,
+    contextId: typeof req.query.contextId === "string" ? req.query.contextId : undefined,
+  });
+  res.json(tasks);
+});
+
+// Cancel/delete task
+app.delete("/tasks/:id", requireAuth, (req, res) => {
+  const task = getTask(param(req, "id"));
+  if (!task) {
+    res.status(404).json({ error: "Task not found" });
+    return;
+  }
+  if (!req.authAgent?.isAdmin && req.authAgent?.id !== task.fromAgent) {
+    res.status(403).json({ error: "Only sender or admin can cancel a task" });
+    return;
+  }
+  // Soft cancel if still active, hard delete if already terminal
+  if (["completed", "failed", "canceled"].includes(task.status)) {
+    deleteTask(task.id);
+  } else {
+    updateTaskStatus(task.id, "canceled");
+    for (const agentId of [task.fromAgent, task.toAgent]) {
+      if (isOnline(agentId)) {
+        pushEvent(agentId, "task_updated", { ...task, status: "canceled" });
+      }
+    }
+  }
+  console.log(`📋 Task canceled/deleted: ${task.id}`);
+  res.json({ ok: true });
+});
+
+// Helper for error messages
+function TASK_TRANSITIONS_FOR_ERROR(status: TaskStatus): TaskStatus[] {
+  const map: Record<TaskStatus, TaskStatus[]> = {
+    submitted: ["working", "canceled", "failed"],
+    working: ["completed", "failed", "canceled", "input-required"],
+    "input-required": ["working", "canceled", "failed"],
+    completed: [], failed: [], canceled: [],
+  };
+  return map[status] ?? [];
+}
+
 // ── Launch Agent — Admin only ───────────────────────────────────
 
 function launchTerminal(cwd: string, command: string): Promise<void> {
@@ -392,6 +582,8 @@ app.use((err: Error, _req: express.Request, res: Response, _next: NextFunction) 
 // Initialize admin key
 const adminKey = initAdminKey();
 
+startCleanupTimer();
+
 const server = app.listen(PORT, HOST, () => {
   console.log(`Swarm Service running at http://${HOST}:${PORT}`);
   console.log(`Auth mode: ${getAuthMode()}`);
@@ -423,6 +615,9 @@ async function gracefulShutdown(signal: string): Promise<void> {
   } catch (err) {
     console.error("Failed to save topology on shutdown:", err);
   }
+
+  closeDb();
+  console.log("Database closed.");
 
   process.exit(0);
 }

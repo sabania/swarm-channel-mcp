@@ -25,3 +25,59 @@ export interface SwarmTopology {
   nodes: Record<string, AgentInfo>;
   edges: [string, string][];
 }
+
+// ── Task Engine (A2A-compatible) ────────────────────────────────
+
+export type TaskStatus = "submitted" | "working" | "input-required" | "completed" | "failed" | "canceled";
+
+/** Valid state transitions: from → allowed targets */
+export const TASK_TRANSITIONS: Record<TaskStatus, TaskStatus[]> = {
+  submitted:        ["working", "canceled", "failed"],
+  working:          ["completed", "failed", "canceled", "input-required"],
+  "input-required": ["working", "canceled", "failed"],
+  completed:        [],
+  failed:           [],
+  canceled:         [],
+};
+
+export function isValidTransition(from: TaskStatus, to: TaskStatus): boolean {
+  return TASK_TRANSITIONS[from]?.includes(to) ?? false;
+}
+
+export interface Task {
+  id: string;
+  contextId: string | null;
+  fromAgent: string;
+  toAgent: string;
+  status: TaskStatus;
+  title: string | null;
+  createdAt: string;
+  updatedAt: string;
+  completedAt: string | null;
+  ttlSeconds: number;
+  retryCount: number;
+  metadata: Record<string, unknown> | null;
+}
+
+export interface TaskMessage {
+  id: string;
+  taskId: string;
+  role: "sender" | "receiver";
+  agentId: string;
+  content: string;
+  createdAt: string;
+}
+
+export interface TaskArtifact {
+  id: string;
+  taskId: string;
+  name: string;
+  mimeType: string;
+  data: string;
+  createdAt: string;
+}
+
+export interface TaskDetail extends Task {
+  messages: TaskMessage[];
+  artifacts: TaskArtifact[];
+}
